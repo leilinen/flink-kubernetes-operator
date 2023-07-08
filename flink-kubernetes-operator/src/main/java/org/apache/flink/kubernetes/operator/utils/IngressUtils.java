@@ -98,6 +98,7 @@ public class IngressUtils {
                     .withNamespace(objectMeta.getNamespace())
                     .endMetadata()
                     .withNewSpec()
+                    // set ingress class name
                     .withIngressClassName(spec.getIngress().getClassName())
                     .withRules(getIngressRule(objectMeta, spec, effectiveConfig))
                     .endSpec()
