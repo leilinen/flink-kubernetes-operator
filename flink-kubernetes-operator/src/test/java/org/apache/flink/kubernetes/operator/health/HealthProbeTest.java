@@ -31,7 +31,6 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.javaoperatorsdk.operator.Operator;
 import io.javaoperatorsdk.operator.RuntimeInfo;
-import io.javaoperatorsdk.operator.api.config.ConfigurationServiceProvider;
 import io.javaoperatorsdk.operator.api.config.ResourceConfiguration;
 import io.javaoperatorsdk.operator.health.InformerHealthIndicator;
 import io.javaoperatorsdk.operator.health.InformerWrappingEventSourceHealthIndicator;
@@ -72,8 +71,8 @@ public class HealthProbeTest {
                     new FlinkOperator(conf) {
                         @Override
                         protected Operator createOperator() {
-                            ConfigurationServiceProvider.reset();
-                            return new Operator(client);
+                            return new Operator(
+                                    overrider -> overrider.withKubernetesClient(client));
                         }
                     };
             try {
@@ -93,7 +92,7 @@ public class HealthProbeTest {
         var unhealthyEventSources =
                 new HashMap<String, Map<String, InformerWrappingEventSourceHealthIndicator>>();
         var runtimeInfo =
-                new RuntimeInfo(new Operator(client)) {
+                new RuntimeInfo(new Operator(overrider -> overrider.withKubernetesClient(client))) {
                     @Override
                     public boolean isStarted() {
                         return isRunning.get();
@@ -166,7 +165,7 @@ public class HealthProbeTest {
     @Test
     public void testHealthProbeCanary() {
         var runtimeInfo =
-                new RuntimeInfo(new Operator(client)) {
+                new RuntimeInfo(new Operator(overrider -> overrider.withKubernetesClient(client))) {
                     @Override
                     public boolean isStarted() {
                         return true;
@@ -182,31 +181,31 @@ public class HealthProbeTest {
 
         var canaryManager =
                 new CanaryResourceManager<FlinkDeployment>(
-                        new FlinkConfigManager(new Configuration()), client);
+                        new FlinkConfigManager(new Configuration()));
         HealthProbe.INSTANCE.registerCanaryResourceManager(canaryManager);
 
         // No canary resources
         assertTrue(HealthProbe.INSTANCE.isHealthy());
 
         var canary = TestUtils.createCanaryDeployment();
-        canaryManager.handleCanaryResourceReconciliation(ReconciliationUtils.clone(canary));
+        canaryManager.handleCanaryResourceReconciliation(ReconciliationUtils.clone(canary), client);
 
         // Canary resource healthy before health check
         assertTrue(HealthProbe.INSTANCE.isHealthy());
 
         // No reconciliation before health check
-        canaryManager.checkHealth(ResourceID.fromResource(canary));
+        canaryManager.checkHealth(ResourceID.fromResource(canary), client);
         assertFalse(HealthProbe.INSTANCE.isHealthy());
 
         // Healthy again
         canary.getMetadata().setGeneration(2L);
-        canaryManager.handleCanaryResourceReconciliation(ReconciliationUtils.clone(canary));
-        canaryManager.checkHealth(ResourceID.fromResource(canary));
+        canaryManager.handleCanaryResourceReconciliation(ReconciliationUtils.clone(canary), client);
+        canaryManager.checkHealth(ResourceID.fromResource(canary), client);
         assertTrue(HealthProbe.INSTANCE.isHealthy());
 
         canary.getMetadata().setGeneration(3L);
-        canaryManager.handleCanaryResourceReconciliation(ReconciliationUtils.clone(canary));
-        canaryManager.checkHealth(ResourceID.fromResource(canary));
+        canaryManager.handleCanaryResourceReconciliation(ReconciliationUtils.clone(canary), client);
+        canaryManager.checkHealth(ResourceID.fromResource(canary), client);
         assertTrue(HealthProbe.INSTANCE.isHealthy());
     }
 

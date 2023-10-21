@@ -29,7 +29,7 @@ under the License.
 
     <groupId>org.apache.flink</groupId>
     <artifactId>flink-kubernetes-operator-parent</artifactId>
-    <version>1.6-SNAPSHOT</version>
+    <version>1.7-SNAPSHOT</version>
 
     <name>Flink Kubernetes: </name>
     <packaging>pom</packaging>
@@ -53,10 +53,10 @@ under the License.
     <modules>
         <module>flink-kubernetes-standalone</module>
         <module>flink-kubernetes-operator</module>
-        <module>flink-kubernetes-operator-autoscaler</module>
         <module>flink-kubernetes-operator-api</module>
         <module>flink-kubernetes-webhook</module>
         <module>flink-kubernetes-docs</module>
+        <module>flink-autoscaler</module>
         <module>examples/flink-sql-runner-example</module>
         <module>examples/flink-beam-example</module>
         <module>examples/kubernetes-client-examples</module>
@@ -73,11 +73,10 @@ under the License.
         <maven-javadoc-plugin.version>3.3.2</maven-javadoc-plugin.version>
         <git-commit-id-maven-plugin.version>5.0.0</git-commit-id-maven-plugin.version>
 
-        <operator.sdk.version>4.3.5</operator.sdk.version>
-        <operator.sdk.admission-controller.version>0.2.0</operator.sdk.admission-controller.version>
-        <operator.sdk.jenvtest.version>0.9.1</operator.sdk.jenvtest.version>
+        <operator.sdk.version>4.4.4</operator.sdk.version>
+        <operator.sdk.webhook-framework.version>1.1.1</operator.sdk.webhook-framework.version>
 
-        <fabric8.version>6.7.0</fabric8.version>
+        <fabric8.version>6.8.1</fabric8.version>
 
         <lombok.version>1.18.22</lombok.version>
         <commons-lang3.version>3.12.0</commons-lang3.version>
@@ -94,6 +93,8 @@ under the License.
 
         <okhttp.version>4.11.0</okhttp.version>
         <curator-test.version>5.2.0</curator-test.version>
+
+        <assertj.version>3.21.0</assertj.version>
     </properties>
 
     <dependencyManagement>

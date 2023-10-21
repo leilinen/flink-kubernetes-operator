@@ -24,7 +24,6 @@ import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobState;
 import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.exception.MissingJobManagerException;
@@ -55,9 +54,8 @@ public abstract class AbstractFlinkDeploymentObserver
 
     protected final Logger logger = LoggerFactory.getLogger(this.getClass());
 
-    public AbstractFlinkDeploymentObserver(
-            FlinkConfigManager configManager, EventRecorder eventRecorder) {
-        super(configManager, eventRecorder);
+    public AbstractFlinkDeploymentObserver(EventRecorder eventRecorder) {
+        super(eventRecorder);
     }
 
     @Override
@@ -88,7 +86,7 @@ public abstract class AbstractFlinkDeploymentObserver
             flinkApp.getStatus().getClusterInfo().putAll(clusterInfo);
             logger.debug("ClusterInfo: {}", flinkApp.getStatus().getClusterInfo());
         } catch (Exception e) {
-            logger.error("Exception while fetching cluster info", e);
+            logger.warn("Exception while fetching cluster info", e);
         }
     }
 
@@ -155,7 +153,7 @@ public abstract class AbstractFlinkDeploymentObserver
 
         if (previousJmStatus != JobManagerDeploymentStatus.MISSING
                 && previousJmStatus != JobManagerDeploymentStatus.ERROR) {
-            onMissingDeployment(flinkApp);
+            onMissingDeployment(ctx);
         }
     }
 
@@ -217,58 +215,67 @@ public abstract class AbstractFlinkDeploymentObserver
                 && lastReconciledSpec.getJob().getState() == JobState.SUSPENDED;
     }
 
-    private void onMissingDeployment(FlinkDeployment deployment) {
+    private void onMissingDeployment(FlinkResourceContext<FlinkDeployment> ctx) {
         String err = "Missing JobManager deployment";
         logger.error(err);
-        ReconciliationUtils.updateForReconciliationError(
-                deployment,
-                new MissingJobManagerException(err),
-                configManager.getOperatorConfiguration());
+        ReconciliationUtils.updateForReconciliationError(ctx, new MissingJobManagerException(err));
         eventRecorder.triggerEvent(
-                deployment,
+                ctx.getResource(),
                 EventRecorder.Type.Warning,
                 EventRecorder.Reason.Missing,
                 EventRecorder.Component.JobManagerDeployment,
-                err);
+                err,
+                ctx.getKubernetesClient());
     }
 
     @Override
-    protected void updateStatusToDeployedIfAlreadyUpgraded(
-            FlinkResourceContext<FlinkDeployment> ctx) {
+    protected boolean checkIfAlreadyUpgraded(FlinkResourceContext<FlinkDeployment> ctx) {
         var flinkDep = ctx.getResource();
         var status = flinkDep.getStatus();
+
+        if (status.getJobManagerDeploymentStatus() != JobManagerDeploymentStatus.MISSING) {
+            // We know that the current deployment is not missing, nothing to check
+            return false;
+        }
+
+        // We are performing a full upgrade
         Optional<Deployment> depOpt = ctx.getJosdkContext().getSecondaryResource(Deployment.class);
-        depOpt.ifPresent(
-                deployment -> {
-                    Map<String, String> annotations = deployment.getMetadata().getAnnotations();
-                    if (annotations == null) {
-                        return;
-                    }
-                    Long deployedGeneration =
-                            Optional.ofNullable(annotations.get(FlinkUtils.CR_GENERATION_LABEL))
-                                    .map(Long::valueOf)
-                                    .orElse(-1L);
 
-                    Long upgradeTargetGeneration =
-                            ReconciliationUtils.getUpgradeTargetGeneration(flinkDep);
+        if (!depOpt.isPresent()) {
+            // Nothing is deployed, so definitely not upgraded
+            return false;
+        }
 
-                    if (deployedGeneration.equals(upgradeTargetGeneration)) {
-                        logger.info("Pending upgrade is already deployed, updating status.");
-                        ReconciliationUtils.updateStatusForAlreadyUpgraded(flinkDep);
-                        if (flinkDep.getSpec().getJob() != null) {
-                            status.getJobStatus()
-                                    .setState(
-                                            org.apache.flink.api.common.JobStatus.RECONCILING
-                                                    .name());
-                        }
-                        status.setJobManagerDeploymentStatus(JobManagerDeploymentStatus.DEPLOYING);
-                    } else {
-                        logger.warn(
-                                "Running deployment generation {} doesn't match upgrade target generation {}.",
-                                deployedGeneration,
-                                upgradeTargetGeneration);
-                    }
-                });
+        var deployment = depOpt.get();
+        if (deployment.isMarkedForDeletion()) {
+            logger.debug("Deployment already marked for deletion, ignoring...");
+            return false;
+        }
+
+        Map<String, String> annotations = deployment.getMetadata().getAnnotations();
+        if (annotations == null) {
+            logger.warn(
+                    "Running deployment doesn't have any annotations. This could indicate a deployment error.");
+            return false;
+        }
+        Long deployedGeneration =
+                Optional.ofNullable(annotations.get(FlinkUtils.CR_GENERATION_LABEL))
+                        .map(Long::valueOf)
+                        .orElse(-1L);
+
+        Long upgradeTargetGeneration = ReconciliationUtils.getUpgradeTargetGeneration(flinkDep);
+
+        if (deployedGeneration.equals(upgradeTargetGeneration)) {
+            logger.info("Pending upgrade is already deployed, updating status.");
+            status.setJobManagerDeploymentStatus(JobManagerDeploymentStatus.DEPLOYING);
+            return true;
+        } else {
+            logger.warn(
+                    "Running deployment generation {} doesn't match upgrade target generation {}.",
+                    deployedGeneration,
+                    upgradeTargetGeneration);
+            return false;
+        }
     }
 
     /**

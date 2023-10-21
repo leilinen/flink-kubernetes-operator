@@ -36,6 +36,26 @@ function wait_for_logs {
   exit 1
 }
 
+function wait_for_operator_logs {
+  local successful_response_regex=$1
+  local timeout=$2
+  operator_pod_name=$(get_operator_pod_name)
+  operator_pod_namespace=$(get_operator_pod_namespace)
+
+    # wait or timeout until the log shows up
+  echo "Waiting for operator log \"$1\"..."
+  for i in $(seq 1 ${timeout}); do
+    if kubectl logs $operator_pod_name -c flink-kubernetes-operator -n "${operator_pod_namespace}" | grep -E "${successful_response_regex}" >/dev/null; then
+      echo "Log \"$1\" shows up."
+      return
+    fi
+
+    sleep 1
+  done
+  echo "Log $1 does not show up within a timeout of ${timeout} sec"
+  exit 1
+}
+
 function wait_for_status {
   local resource=$1
   local status_path=$2
@@ -54,6 +74,26 @@ function wait_for_status {
   done
   echo "Status verification for $resource$status_path failed with timeout of ${timeout}."
   echo "Status converged to $status instead of $expected_status."
+  exit 1
+}
+
+function wait_for_event {
+  local kind=$1
+  local resource=$2
+  local event_filter=$3
+  local timeout=$4
+
+  echo "Waiting for $resource event matching $event_filter..."
+  for i in $(seq 1 ${timeout}); do
+    test=$(kubectl get events --field-selector involvedObject.kind=$kind,involvedObject.name=$resource -oyaml | yq ".items.[] | select($event_filter)")
+    if [ "$test" ]; then
+      echo "Successfully verified that $resource event exists."
+      return 0
+    fi
+
+    sleep 1
+  done
+  echo "Event verification for $resource failed with timeout of ${timeout}."
   exit 1
 }
 
@@ -128,6 +168,20 @@ function retry_times() {
 
     echo "Command: ${command} failed ${retriesNumber} times."
     return 1
+}
+
+function get_flink_version() {
+  local resource=$1
+
+  kubectl get -oyaml $resource | yq ".spec.flinkVersion"
+}
+
+function patch_flink_config() {
+  local patch=$1
+  operator_pod_namespace=$(get_operator_pod_namespace)
+  echo "Patch flink-operator-config with config: ${patch}"
+
+  kubectl patch cm flink-operator-config -n "${operator_pod_namespace}" --type merge -p "${patch}"
 }
 
 function check_operator_log_for_errors {
@@ -261,6 +315,14 @@ function cleanup_and_exit() {
     echo "Deployment deleted"
     kubectl delete cm --selector="app=${CLUSTER_ID},configmap-type=high-availability"
     echo "Cleanup completed"
+}
+
+function operator_cleanup_and_exit() {
+  echo "Starting cleanup"
+
+  if [ $TRAPPED_EXIT_CODE != 0 ];then
+    debug_and_show_logs
+  fi
 }
 
 function _on_exit_callback {

@@ -18,14 +18,14 @@
 package org.apache.flink.kubernetes.operator;
 
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesResourceMetricGroup;
 import org.apache.flink.kubernetes.operator.service.FlinkResourceContextFactory;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
+import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 
 import java.util.Map;
@@ -35,16 +35,16 @@ public class TestingFlinkResourceContextFactory extends FlinkResourceContextFact
     private final FlinkService flinkService;
 
     public TestingFlinkResourceContextFactory(
-            KubernetesClient kubernetesClient,
             FlinkConfigManager configManager,
             KubernetesOperatorMetricGroup operatorMetricGroup,
-            FlinkService flinkService) {
-        super(kubernetesClient, configManager, operatorMetricGroup);
+            FlinkService flinkService,
+            EventRecorder eventRecorder) {
+        super(configManager, operatorMetricGroup, eventRecorder);
         this.flinkService = flinkService;
     }
 
     @Override
-    protected FlinkService getOrCreateFlinkService(FlinkDeployment deployment) {
+    protected FlinkService getFlinkService(FlinkResourceContext<?> ctx) {
         return flinkService;
     }
 

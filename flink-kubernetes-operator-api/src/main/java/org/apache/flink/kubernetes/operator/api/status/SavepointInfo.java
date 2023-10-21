@@ -19,6 +19,7 @@ package org.apache.flink.kubernetes.operator.api.status;
 
 import org.apache.flink.annotation.Experimental;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -33,7 +34,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class SavepointInfo {
+public class SavepointInfo implements SnapshotInfo {
     /** Last completed savepoint by the operator. */
     private Savepoint lastSavepoint;
 
@@ -44,7 +45,7 @@ public class SavepointInfo {
     private Long triggerTimestamp;
 
     /** Savepoint trigger mechanism. */
-    private SavepointTriggerType triggerType;
+    private SnapshotTriggerType triggerType;
 
     /** Savepoint format. */
     private SavepointFormatType formatType;
@@ -56,7 +57,7 @@ public class SavepointInfo {
     private long lastPeriodicSavepointTimestamp = 0L;
 
     public void setTrigger(
-            String triggerId, SavepointTriggerType triggerType, SavepointFormatType formatType) {
+            String triggerId, SnapshotTriggerType triggerType, SavepointFormatType formatType) {
         this.triggerId = triggerId;
         this.triggerTimestamp = System.currentTimeMillis();
         this.triggerType = triggerType;
@@ -80,10 +81,42 @@ public class SavepointInfo {
         if (lastSavepoint == null || !lastSavepoint.getLocation().equals(savepoint.getLocation())) {
             lastSavepoint = savepoint;
             savepointHistory.add(savepoint);
-            if (savepoint.getTriggerType() == SavepointTriggerType.PERIODIC) {
+            if (savepoint.getTriggerType() == SnapshotTriggerType.PERIODIC) {
                 lastPeriodicSavepointTimestamp = savepoint.getTimeStamp();
             }
         }
         resetTrigger();
+    }
+
+    @JsonIgnore
+    @Override
+    public Long getLastTriggerNonce() {
+        return lastSavepoint == null ? null : lastSavepoint.getTriggerNonce();
+    }
+
+    @JsonIgnore
+    @Override
+    public long getLastPeriodicTriggerTimestamp() {
+        return lastPeriodicSavepointTimestamp;
+    }
+
+    @JsonIgnore
+    @Override
+    public SnapshotTriggerType getLastTriggerType() {
+        return lastSavepoint == null ? null : lastSavepoint.getTriggerType();
+    }
+
+    @JsonIgnore
+    @Override
+    public String formatErrorMessage(Long triggerNonce) {
+        return SnapshotTriggerType.PERIODIC == triggerType
+                ? "Periodic savepoint failed"
+                : "Savepoint failed for savepointTriggerNonce: " + triggerNonce;
+    }
+
+    @JsonIgnore
+    @Override
+    public Snapshot getLastSnapshot() {
+        return lastSavepoint;
     }
 }

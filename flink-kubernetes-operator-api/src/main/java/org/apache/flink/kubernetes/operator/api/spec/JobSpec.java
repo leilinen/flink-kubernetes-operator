@@ -47,7 +47,7 @@ public class JobSpec implements Diffable<JobSpec> {
     private String jarURI;
 
     /** Parallelism of the Flink job. */
-    @SpecDiff(DiffType.SCALE)
+    @SpecDiff(value = DiffType.SCALE, mode = KubernetesDeploymentMode.STANDALONE)
     private int parallelism;
 
     /** Fully qualified main class name of the Flink job. */
@@ -72,6 +72,13 @@ public class JobSpec implements Diffable<JobSpec> {
      */
     @SpecDiff(DiffType.IGNORE)
     private String initialSavepointPath;
+
+    /**
+     * Nonce used to manually trigger checkpoint for the running job. In order to trigger a
+     * checkpoint, change the number to anything other than the current value.
+     */
+    @SpecDiff(DiffType.IGNORE)
+    private Long checkpointTriggerNonce;
 
     /** Upgrade mode of the Flink job. */
     @SpecDiff(DiffType.IGNORE)

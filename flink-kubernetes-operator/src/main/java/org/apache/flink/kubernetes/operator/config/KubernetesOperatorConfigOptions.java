@@ -22,6 +22,7 @@ import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.core.execution.SavepointFormatType;
+import org.apache.flink.kubernetes.operator.api.status.CheckpointType;
 
 import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.javaoperatorsdk.operator.api.config.ConfigurationService;
@@ -29,6 +30,7 @@ import io.javaoperatorsdk.operator.api.config.LeaderElectionConfiguration;
 import io.javaoperatorsdk.operator.api.reconciler.Constants;
 
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.Map;
 
 /** This class holds configuration constants used by flink operator. */
@@ -36,6 +38,9 @@ public class KubernetesOperatorConfigOptions {
 
     public static final String K8S_OP_CONF_PREFIX = "kubernetes.operator.";
 
+    private static final String DEFAULT_CONF_PREFIX = K8S_OP_CONF_PREFIX + "default-configuration.";
+    public static final String VERSION_CONF_PREFIX = DEFAULT_CONF_PREFIX + "flink-version.";
+    public static final String NAMESPACE_CONF_PREFIX = DEFAULT_CONF_PREFIX + "namespace.";
     public static final String SECTION_SYSTEM = "system";
     public static final String SECTION_ADVANCED = "system_advanced";
     public static final String SECTION_DYNAMIC = "dynamic";
@@ -91,6 +96,14 @@ public class KubernetesOperatorConfigOptions {
                             operatorConfigKey("observer.savepoint.trigger.grace-period"))
                     .withDescription(
                             "The interval before a savepoint trigger attempt is marked as unsuccessful.");
+
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<Duration> OPERATOR_CHECKPOINT_TRIGGER_GRACE_PERIOD =
+            operatorConfig("checkpoint.trigger.grace-period")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(1))
+                    .withDescription(
+                            "The interval before a checkpoint trigger attempt is marked as unsuccessful.");
 
     @Documentation.Section(SECTION_SYSTEM)
     public static final ConfigOption<Duration> OPERATOR_FLINK_CLIENT_TIMEOUT =
@@ -149,6 +162,14 @@ public class KubernetesOperatorConfigOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription("Whether to ignore pending savepoint during job upgrade.");
+
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<Boolean> JOB_UPGRADE_INPLACE_SCALING_ENABLED =
+            operatorConfig("job.upgrade.inplace-scaling.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Whether to enable inplace scaling for Flink 1.18+ using the resource requirements API. On failure or earlier Flink versions it falls back to regular full redeployment.");
 
     @Documentation.Section(SECTION_ADVANCED)
     public static final ConfigOption<Boolean> OPERATOR_DYNAMIC_CONFIG_ENABLED =
@@ -251,6 +272,14 @@ public class KubernetesOperatorConfigOptions {
                     .withDescription(
                             "Maximum number of throwable to be included in CR status error field.");
 
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<Map<String, String>> OPERATOR_EXCEPTION_LABEL_MAPPER =
+            operatorConfig("exception.label.mapper")
+                    .mapType()
+                    .defaultValue(new HashMap<>())
+                    .withDescription(
+                            "Key-Value pair where key is the REGEX to filter through the exception messages and value is the string to be included in CR status error label field if the REGEX matches. Expected format: headerKey1:headerValue1,headerKey2:headerValue2.");
+
     @Documentation.Section(SECTION_ADVANCED)
     public static final ConfigOption<Duration> OPERATOR_SAVEPOINT_HISTORY_MAX_AGE_THRESHOLD =
             ConfigOptions.key(OPERATOR_SAVEPOINT_HISTORY_MAX_AGE.key() + ".threshold")
@@ -269,13 +298,40 @@ public class KubernetesOperatorConfigOptions {
                                     + "Expected format: headerKey1:headerValue1,headerKey2:headerValue2.");
 
     @Documentation.Section(SECTION_DYNAMIC)
-    public static final ConfigOption<Duration> PERIODIC_SAVEPOINT_INTERVAL =
+    public static final ConfigOption<String> PERIODIC_SAVEPOINT_INTERVAL =
             operatorConfig("periodic.savepoint.interval")
-                    .durationType()
-                    .defaultValue(Duration.ZERO)
+                    .stringType()
+                    .defaultValue("")
                     .withDescription(
-                            "Interval at which periodic savepoints will be triggered. "
-                                    + "The triggering schedule is not guaranteed, savepoints will be triggered as part of the regular reconcile loop.");
+                            "Option to enable automatic savepoint triggering. Can be specified "
+                                    + "either as a Duration type (i.e. '10m') or as a cron expression "
+                                    + "in Quartz format (6 or 7 positions, see "
+                                    + "http://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/crontrigger.html)."
+                                    + "The triggering schedule is not guaranteed, savepoints will be "
+                                    + "triggered as part of the regular reconcile loop. "
+                                    + "WARNING: not intended to be used together with the cron-based "
+                                    + "periodic savepoint triggering");
+
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<String> PERIODIC_CHECKPOINT_INTERVAL =
+            operatorConfig("periodic.checkpoint.interval")
+                    .stringType()
+                    .defaultValue("")
+                    .withDescription(
+                            "Option to enable automatic checkpoint triggering. Can be specified "
+                                    + "either as a Duration type (i.e. '10m') or as a cron expression "
+                                    + "in Quartz format (6 or 7 positions, see "
+                                    + "http://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/crontrigger.html)."
+                                    + "The triggering schedule is not guaranteed, checkpoints will "
+                                    + "be triggered as part of the regular reconcile loop. "
+                                    + "NOTE: checkpoints are generally managed by Flink. This "
+                                    + "setting isn't meant to replace Flink's checkpoint settings, "
+                                    + "but to complement them in special cases. For instance, a "
+                                    + "full checkpoint might need to be occasionally triggered to "
+                                    + "break the chain of incremental checkpoints and consolidate "
+                                    + "the partial incremental files. "
+                                    + "WARNING: not intended to be used together with the cron-based "
+                                    + "periodic checkpoint triggering");
 
     @Documentation.Section(SECTION_SYSTEM)
     public static final ConfigOption<String> OPERATOR_WATCHED_NAMESPACES =
@@ -306,24 +362,44 @@ public class KubernetesOperatorConfigOptions {
             operatorConfig("retry.initial.interval")
                     .durationType()
                     .defaultValue(Duration.ofSeconds(5))
-                    .withDescription(
-                            "Initial interval of automatic reconcile retries on recoverable errors.");
+                    .withDescription("Initial interval of retries on unhandled controller errors.");
+
+    @Documentation.Section(SECTION_SYSTEM)
+    public static final ConfigOption<Duration> OPERATOR_RETRY_MAX_INTERVAL =
+            operatorConfig("retry.max.interval")
+                    .durationType()
+                    .noDefaultValue()
+                    .withDescription("Max interval of retries on unhandled controller errors.");
 
     @Documentation.Section(SECTION_SYSTEM)
     public static final ConfigOption<Double> OPERATOR_RETRY_INTERVAL_MULTIPLIER =
             operatorConfig("retry.interval.multiplier")
                     .doubleType()
-                    .defaultValue(2.0)
+                    .defaultValue(1.5)
                     .withDescription(
-                            "Interval multiplier of automatic reconcile retries on recoverable errors.");
+                            "Interval multiplier of retries on unhandled controller errors.");
 
     @Documentation.Section(SECTION_SYSTEM)
     public static final ConfigOption<Integer> OPERATOR_RETRY_MAX_ATTEMPTS =
             operatorConfig("retry.max.attempts")
                     .intType()
-                    .defaultValue(10)
+                    .defaultValue(15)
+                    .withDescription("Max attempts of retries on unhandled controller errors.");
+
+    @Documentation.Section(SECTION_SYSTEM)
+    public static final ConfigOption<Duration> OPERATOR_RATE_LIMITER_PERIOD =
+            operatorConfig("rate-limiter.refresh-period")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(15))
+                    .withDescription("Operator rate limiter refresh period for each resource.");
+
+    @Documentation.Section(SECTION_SYSTEM)
+    public static final ConfigOption<Integer> OPERATOR_RATE_LIMITER_LIMIT =
+            operatorConfig("rate-limiter.limit")
+                    .intType()
+                    .defaultValue(5)
                     .withDescription(
-                            "Max attempts of automatic reconcile retries on recoverable errors.");
+                            "Max number of reconcile loops triggered within the rate limiter refresh period for each resource. Setting the limit <= 0 disables the limiter.");
 
     @Documentation.Section(SECTION_DYNAMIC)
     public static final ConfigOption<Boolean> OPERATOR_JOB_UPGRADE_LAST_STATE_FALLBACK_ENABLED =
@@ -348,6 +424,13 @@ public class KubernetesOperatorConfigOptions {
                     .defaultValue(SavepointFormatType.DEFAULT)
                     .withDescription(
                             "Type of the binary format in which a savepoint should be taken.");
+
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<CheckpointType> OPERATOR_CHECKPOINT_TYPE =
+            operatorConfig("checkpoint.type")
+                    .enumType(CheckpointType.class)
+                    .defaultValue(CheckpointType.FULL)
+                    .withDescription("Type of checkpoint.");
 
     @Documentation.Section(SECTION_ADVANCED)
     public static final ConfigOption<Boolean> OPERATOR_HEALTH_PROBE_ENABLED =
@@ -484,6 +567,14 @@ public class KubernetesOperatorConfigOptions {
                             "Allowed max time between spec update and reconciliation for canary resources.");
 
     @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<Boolean> OPERATOR_JM_STARTUP_PROBE_ENABLED =
+            operatorConfig("jm-deployment.startup.probe.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Enable job manager startup probe to allow detecting when the jobmanager could not submit the job.");
+
+    @Documentation.Section(SECTION_DYNAMIC)
     public static final ConfigOption<Boolean> POD_TEMPLATE_MERGE_BY_NAME =
             operatorConfig("pod-template.merge-arrays-by-name")
                     .booleanType()
@@ -497,4 +588,20 @@ public class KubernetesOperatorConfigOptions {
                     .enumType(DeletionPropagation.class)
                     .defaultValue(DeletionPropagation.FOREGROUND)
                     .withDescription("JM/TM Deployment deletion propagation.");
+
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<Boolean> SAVEPOINT_ON_DELETION =
+            operatorConfig("job.savepoint-on-deletion")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Indicate whether a savepoint must be taken when deleting a FlinkDeployment or FlinkSessionJob.");
+
+    @Documentation.Section(SECTION_DYNAMIC)
+    public static final ConfigOption<Boolean> DRAIN_ON_SAVEPOINT_DELETION =
+            operatorConfig("job.drain-on-savepoint-deletion")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Indicate whether the job should be drained when stopping with savepoint.");
 }

@@ -19,6 +19,7 @@ package org.apache.flink.kubernetes.operator.reconciler.deployment;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.autoscaler.JobAutoScaler;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.spec.AbstractFlinkSpec;
@@ -26,16 +27,17 @@ import org.apache.flink.kubernetes.operator.api.spec.JobState;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.api.status.CommonStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobStatus;
-import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.autoscaler.KubernetesJobAutoScalerContext;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.reconciler.SnapshotType;
 import org.apache.flink.kubernetes.operator.service.CheckpointHistoryWrapper;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
-import org.apache.flink.kubernetes.operator.utils.SavepointUtils;
+import org.apache.flink.kubernetes.operator.utils.SnapshotUtils;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
+import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import lombok.Value;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,11 +62,10 @@ public abstract class AbstractJobReconciler<
     private static final Logger LOG = LoggerFactory.getLogger(AbstractJobReconciler.class);
 
     public AbstractJobReconciler(
-            KubernetesClient kubernetesClient,
             EventRecorder eventRecorder,
             StatusRecorder<CR, STATUS> statusRecorder,
-            JobAutoScalerFactory autoscalerFactory) {
-        super(kubernetesClient, eventRecorder, statusRecorder, autoscalerFactory);
+            JobAutoScaler<ResourceID, KubernetesJobAutoScalerContext> autoscaler) {
+        super(eventRecorder, statusRecorder, autoscaler);
     }
 
     @Override
@@ -83,17 +84,16 @@ public abstract class AbstractJobReconciler<
     private boolean shouldWaitForPendingSavepoint(JobStatus jobStatus, Configuration conf) {
         return !conf.getBoolean(
                         KubernetesOperatorConfigOptions.JOB_UPGRADE_IGNORE_PENDING_SAVEPOINT)
-                && SavepointUtils.savepointInProgress(jobStatus);
+                && SnapshotUtils.savepointInProgress(jobStatus);
     }
 
     @Override
-    protected boolean reconcileSpecChange(FlinkResourceContext<CR> ctx, Configuration deployConfig)
+    protected boolean reconcileSpecChange(
+            FlinkResourceContext<CR> ctx, Configuration deployConfig, SPEC lastReconciledSpec)
             throws Exception {
 
         var resource = ctx.getResource();
         STATUS status = resource.getStatus();
-        var reconciliationStatus = status.getReconciliationStatus();
-        SPEC lastReconciledSpec = reconciliationStatus.deserializeLastReconciledSpec();
         SPEC currentDeploySpec = resource.getSpec();
 
         JobState currentJobState = lastReconciledSpec.getJob().getState();
@@ -112,10 +112,15 @@ public abstract class AbstractJobReconciler<
                     EventRecorder.Type.Normal,
                     EventRecorder.Reason.Suspended,
                     EventRecorder.Component.JobManagerDeployment,
-                    MSG_SUSPENDED);
+                    MSG_SUSPENDED,
+                    ctx.getKubernetesClient());
+
+            UpgradeMode upgradeMode = availableUpgradeMode.getUpgradeMode().get();
+
             // We must record the upgrade mode used to the status later
-            currentDeploySpec.getJob().setUpgradeMode(availableUpgradeMode.getUpgradeMode().get());
-            cancelJob(ctx, availableUpgradeMode.getUpgradeMode().get());
+            currentDeploySpec.getJob().setUpgradeMode(upgradeMode);
+
+            cancelJob(ctx, upgradeMode);
             if (desiredJobState == JobState.RUNNING) {
                 ReconciliationUtils.updateStatusBeforeDeploymentAttempt(
                         resource, deployConfig, clock);
@@ -133,7 +138,7 @@ public abstract class AbstractJobReconciler<
             }
             // We record the target spec into an upgrading state before deploying
             ReconciliationUtils.updateStatusBeforeDeploymentAttempt(resource, deployConfig, clock);
-            statusRecorder.patchAndCacheStatus(resource);
+            statusRecorder.patchAndCacheStatus(resource, ctx.getKubernetesClient());
 
             restoreJob(
                     ctx,
@@ -262,30 +267,6 @@ public abstract class AbstractJobReconciler<
     }
 
     @Override
-    protected void rollback(FlinkResourceContext<CR> ctx) throws Exception {
-        var resource = ctx.getResource();
-        var reconciliationStatus = resource.getStatus().getReconciliationStatus();
-        var rollbackSpec = reconciliationStatus.deserializeLastStableSpec();
-        rollbackSpec.getJob().setUpgradeMode(UpgradeMode.LAST_STATE);
-
-        UpgradeMode upgradeMode = resource.getSpec().getJob().getUpgradeMode();
-
-        cancelJob(
-                ctx,
-                upgradeMode == UpgradeMode.STATELESS
-                        ? UpgradeMode.STATELESS
-                        : UpgradeMode.LAST_STATE);
-
-        restoreJob(
-                ctx,
-                rollbackSpec,
-                ctx.getDeployConfig(rollbackSpec),
-                upgradeMode != UpgradeMode.STATELESS);
-
-        reconciliationStatus.setState(ReconciliationState.ROLLED_BACK);
-    }
-
-    @Override
     public boolean reconcileOtherChanges(FlinkResourceContext<CR> ctx) throws Exception {
         var status = ctx.getResource().getStatus();
         var jobStatus =
@@ -298,8 +279,20 @@ public abstract class AbstractJobReconciler<
             resubmitJob(ctx, false);
             return true;
         } else {
-            return SavepointUtils.triggerSavepointIfNeeded(
-                    ctx.getFlinkService(), ctx.getResource(), ctx.getObserveConfig());
+            boolean savepointTriggered =
+                    SnapshotUtils.triggerSnapshotIfNeeded(
+                            ctx.getFlinkService(),
+                            ctx.getResource(),
+                            ctx.getObserveConfig(),
+                            SnapshotType.SAVEPOINT);
+            boolean checkpointTriggered =
+                    SnapshotUtils.triggerSnapshotIfNeeded(
+                            ctx.getFlinkService(),
+                            ctx.getResource(),
+                            ctx.getObserveConfig(),
+                            SnapshotType.CHECKPOINT);
+
+            return savepointTriggered || checkpointTriggered;
         }
     }
 

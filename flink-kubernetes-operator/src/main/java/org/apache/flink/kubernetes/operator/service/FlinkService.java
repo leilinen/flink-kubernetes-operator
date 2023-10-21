@@ -19,20 +19,24 @@ package org.apache.flink.kubernetes.operator.service;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.client.program.ClusterClient;
+import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkSessionJobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.api.status.CheckpointInfo;
 import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.Savepoint;
 import org.apache.flink.kubernetes.operator.api.status.SavepointInfo;
-import org.apache.flink.kubernetes.operator.api.status.SavepointTriggerType;
+import org.apache.flink.kubernetes.operator.api.status.SnapshotTriggerType;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
+import org.apache.flink.kubernetes.operator.observer.CheckpointFetchResult;
 import org.apache.flink.kubernetes.operator.observer.SavepointFetchResult;
 import org.apache.flink.runtime.client.JobStatusMessage;
 import org.apache.flink.runtime.jobmaster.JobResult;
+import org.apache.flink.runtime.rest.messages.job.JobDetailsInfo;
 
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.PodList;
@@ -84,14 +88,23 @@ public interface FlinkService {
 
     void triggerSavepoint(
             String jobId,
-            SavepointTriggerType triggerType,
+            SnapshotTriggerType triggerType,
             SavepointInfo savepointInfo,
+            Configuration conf)
+            throws Exception;
+
+    void triggerCheckpoint(
+            String jobId,
+            SnapshotTriggerType triggerType,
+            CheckpointInfo checkpointInfo,
             Configuration conf)
             throws Exception;
 
     Optional<Savepoint> getLastCheckpoint(JobID jobId, Configuration conf) throws Exception;
 
     SavepointFetchResult fetchSavepointInfo(String triggerId, String jobId, Configuration conf);
+
+    CheckpointFetchResult fetchCheckpointInfo(String triggerId, String jobId, Configuration conf);
 
     Tuple2<
                     Optional<CheckpointHistoryWrapper.CompletedCheckpointInfo>,
@@ -106,12 +119,25 @@ public interface FlinkService {
 
     void waitForClusterShutdown(Configuration conf);
 
-    default boolean scale(ObjectMeta meta, JobSpec jobSpec, Configuration conf) {
-        return false;
-    }
+    ScalingResult scale(FlinkResourceContext<?> resourceContext, Configuration deployConfig)
+            throws Exception;
+
+    boolean scalingCompleted(FlinkResourceContext<?> resourceContext);
 
     Map<String, String> getMetrics(Configuration conf, String jobId, List<String> metricNames)
             throws Exception;
 
-    ClusterClient<String> getClusterClient(Configuration conf) throws Exception;
+    RestClusterClient<String> getClusterClient(Configuration conf) throws Exception;
+
+    JobDetailsInfo getJobDetailsInfo(JobID jobID, Configuration conf) throws Exception;
+
+    /** Result of an in-place scaling operation. */
+    enum ScalingResult {
+        // Scaling triggered by the operation
+        SCALING_TRIGGERED,
+        // Job already scaled to target previously
+        ALREADY_SCALED,
+        // Cannot execute scaling, full upgrade required
+        CANNOT_SCALE;
+    }
 }

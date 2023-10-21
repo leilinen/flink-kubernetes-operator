@@ -28,18 +28,16 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 
 import javax.annotation.Nullable;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.function.BiConsumer;
 
 /** Helper class for creating Kubernetes events for Flink resources. */
 public class EventRecorder {
 
-    private final KubernetesClient client;
     private final BiConsumer<AbstractFlinkResource<?, ?>, Event> eventListener;
 
-    public EventRecorder(
-            KubernetesClient client, BiConsumer<AbstractFlinkResource<?, ?>, Event> eventListener) {
-        this.client = client;
+    public EventRecorder(BiConsumer<AbstractFlinkResource<?, ?>, Event> eventListener) {
         this.eventListener = eventListener;
     }
 
@@ -48,8 +46,21 @@ public class EventRecorder {
             Type type,
             Reason reason,
             Component component,
-            String message) {
-        return triggerEvent(resource, type, reason, component, message, null);
+            String message,
+            KubernetesClient client) {
+        return triggerEvent(resource, type, reason, component, message, null, client);
+    }
+
+    public boolean triggerEventOnce(
+            AbstractFlinkResource<?, ?> resource,
+            Type type,
+            Reason reason,
+            Component component,
+            String message,
+            String messageKey,
+            KubernetesClient client) {
+        return triggerEventOnce(
+                resource, type, reason.toString(), message, component, messageKey, client);
     }
 
     public boolean triggerEvent(
@@ -58,8 +69,10 @@ public class EventRecorder {
             Reason reason,
             Component component,
             String message,
-            @Nullable String messageKey) {
-        return triggerEvent(resource, type, reason.toString(), message, component, messageKey);
+            @Nullable String messageKey,
+            KubernetesClient client) {
+        return triggerEvent(
+                resource, type, reason.toString(), message, component, messageKey, client);
     }
 
     public boolean triggerEvent(
@@ -68,7 +81,8 @@ public class EventRecorder {
             String reason,
             String message,
             Component component,
-            String messageKey) {
+            String messageKey,
+            KubernetesClient client) {
         return EventUtils.createOrUpdateEvent(
                 client,
                 resource,
@@ -80,13 +94,54 @@ public class EventRecorder {
                 messageKey);
     }
 
+    public boolean triggerEventOnce(
+            AbstractFlinkResource<?, ?> resource,
+            Type type,
+            String reason,
+            String message,
+            Component component,
+            String messageKey,
+            KubernetesClient client) {
+        return EventUtils.createIfNotExists(
+                client,
+                resource,
+                type,
+                reason,
+                message,
+                component,
+                e -> eventListener.accept(resource, e),
+                messageKey);
+    }
+
+    public boolean triggerEventByInterval(
+            AbstractFlinkResource<?, ?> resource,
+            Type type,
+            String reason,
+            Component component,
+            String message,
+            @Nullable String messageKey,
+            KubernetesClient client,
+            Duration interval) {
+        return EventUtils.createByInterval(
+                client,
+                resource,
+                type,
+                reason,
+                message,
+                component,
+                e -> eventListener.accept(resource, e),
+                messageKey,
+                interval);
+    }
+
     public boolean triggerEvent(
             AbstractFlinkResource<?, ?> resource,
             Type type,
             String reason,
             String message,
-            Component component) {
-        return triggerEvent(resource, type, reason, message, component, null);
+            Component component,
+            KubernetesClient client) {
+        return triggerEvent(resource, type, reason, message, component, null, client);
     }
 
     public static EventRecorder create(
@@ -122,7 +177,7 @@ public class EventRecorder {
                     AuditUtils.logContext(ctx);
                 };
 
-        return new EventRecorder(client, biConsumer);
+        return new EventRecorder(biConsumer);
     }
 
     /** The type of the events. */
@@ -146,6 +201,7 @@ public class EventRecorder {
         Submit,
         JobStatusChanged,
         SavepointError,
+        CheckpointError,
         Cleanup,
         CleanupFailed,
         Missing,
@@ -154,6 +210,7 @@ public class EventRecorder {
         RestartUnhealthyJob,
         ScalingReport,
         IneffectiveScaling,
-        AutoscalerError
+        AutoscalerError,
+        Scaling
     }
 }

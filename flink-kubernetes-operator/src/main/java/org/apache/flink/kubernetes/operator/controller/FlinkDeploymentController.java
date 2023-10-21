@@ -21,7 +21,6 @@ import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.exception.ReconciliationException;
 import org.apache.flink.kubernetes.operator.exception.RecoveryFailureException;
@@ -62,8 +61,6 @@ public class FlinkDeploymentController
                 Cleaner<FlinkDeployment> {
     private static final Logger LOG = LoggerFactory.getLogger(FlinkDeploymentController.class);
 
-    private final FlinkConfigManager configManager;
-
     private final Set<FlinkResourceValidator> validators;
     private final FlinkResourceContextFactory ctxFactory;
     private final ReconcilerFactory reconcilerFactory;
@@ -73,7 +70,6 @@ public class FlinkDeploymentController
     private final CanaryResourceManager<FlinkDeployment> canaryResourceManager;
 
     public FlinkDeploymentController(
-            FlinkConfigManager configManager,
             Set<FlinkResourceValidator> validators,
             FlinkResourceContextFactory ctxFactory,
             ReconcilerFactory reconcilerFactory,
@@ -81,7 +77,6 @@ public class FlinkDeploymentController
             StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder,
             EventRecorder eventRecorder,
             CanaryResourceManager<FlinkDeployment> canaryResourceManager) {
-        this.configManager = configManager;
         this.validators = validators;
         this.ctxFactory = ctxFactory;
         this.reconcilerFactory = reconcilerFactory;
@@ -104,7 +99,8 @@ public class FlinkDeploymentController
                 EventRecorder.Type.Normal,
                 EventRecorder.Reason.Cleanup,
                 EventRecorder.Component.Operator,
-                msg);
+                msg,
+                josdkContext.getClient());
         statusRecorder.updateStatusFromCache(flinkApp);
         var ctx = ctxFactory.getResourceContext(flinkApp, josdkContext);
         try {
@@ -121,7 +117,8 @@ public class FlinkDeploymentController
     public UpdateControl<FlinkDeployment> reconcile(FlinkDeployment flinkApp, Context josdkContext)
             throws Exception {
 
-        if (canaryResourceManager.handleCanaryResourceReconciliation(flinkApp)) {
+        if (canaryResourceManager.handleCanaryResourceReconciliation(
+                flinkApp, josdkContext.getClient())) {
             return UpdateControl.noUpdate();
         }
 
@@ -132,60 +129,62 @@ public class FlinkDeploymentController
         var ctx = ctxFactory.getResourceContext(flinkApp, josdkContext);
         try {
             observerFactory.getOrCreate(flinkApp).observe(ctx);
-            if (!validateDeployment(flinkApp)) {
-                statusRecorder.patchAndCacheStatus(flinkApp);
+            if (!validateDeployment(ctx)) {
+                statusRecorder.patchAndCacheStatus(flinkApp, ctx.getKubernetesClient());
                 return ReconciliationUtils.toUpdateControl(
-                        configManager.getOperatorConfiguration(),
-                        flinkApp,
-                        previousDeployment,
-                        false);
+                        ctx.getOperatorConfig(), flinkApp, previousDeployment, false);
             }
-            statusRecorder.patchAndCacheStatus(flinkApp);
+            statusRecorder.patchAndCacheStatus(flinkApp, ctx.getKubernetesClient());
             reconcilerFactory.getOrCreate(flinkApp).reconcile(ctx);
         } catch (RecoveryFailureException rfe) {
-            handleRecoveryFailed(flinkApp, rfe);
+            handleRecoveryFailed(ctx, rfe);
         } catch (DeploymentFailedException dfe) {
-            handleDeploymentFailed(flinkApp, dfe);
+            handleDeploymentFailed(ctx, dfe);
         } catch (Exception e) {
             eventRecorder.triggerEvent(
                     flinkApp,
                     EventRecorder.Type.Warning,
                     "ClusterDeploymentException",
                     e.getMessage(),
-                    EventRecorder.Component.JobManagerDeployment);
+                    EventRecorder.Component.JobManagerDeployment,
+                    josdkContext.getClient());
             throw new ReconciliationException(e);
         }
 
         LOG.debug("End of reconciliation");
-        statusRecorder.patchAndCacheStatus(flinkApp);
+        statusRecorder.patchAndCacheStatus(flinkApp, ctx.getKubernetesClient());
         return ReconciliationUtils.toUpdateControl(
-                configManager.getOperatorConfiguration(), flinkApp, previousDeployment, true);
+                ctx.getOperatorConfig(), flinkApp, previousDeployment, true);
     }
 
-    private void handleDeploymentFailed(FlinkDeployment flinkApp, DeploymentFailedException dfe) {
+    private void handleDeploymentFailed(
+            FlinkResourceContext<FlinkDeployment> ctx, DeploymentFailedException dfe) {
+        var flinkApp = ctx.getResource();
         LOG.error("Flink Deployment failed", dfe);
         flinkApp.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.ERROR);
         flinkApp.getStatus().getJobStatus().setState(JobStatus.RECONCILING.name());
-        ReconciliationUtils.updateForReconciliationError(
-                flinkApp, dfe, configManager.getOperatorConfiguration());
+        ReconciliationUtils.updateForReconciliationError(ctx, dfe);
         eventRecorder.triggerEvent(
                 flinkApp,
                 EventRecorder.Type.Warning,
                 dfe.getReason(),
                 dfe.getMessage(),
-                EventRecorder.Component.JobManagerDeployment);
+                EventRecorder.Component.JobManagerDeployment,
+                ctx.getKubernetesClient());
     }
 
-    private void handleRecoveryFailed(FlinkDeployment flinkApp, RecoveryFailureException rfe) {
+    private void handleRecoveryFailed(
+            FlinkResourceContext<FlinkDeployment> ctx, RecoveryFailureException rfe) {
         LOG.error("Flink recovery failed", rfe);
-        ReconciliationUtils.updateForReconciliationError(
-                flinkApp, rfe, configManager.getOperatorConfiguration());
+        var flinkApp = ctx.getResource();
+        ReconciliationUtils.updateForReconciliationError(ctx, rfe);
         eventRecorder.triggerEvent(
                 flinkApp,
                 EventRecorder.Type.Warning,
                 rfe.getReason(),
                 rfe.getMessage(),
-                EventRecorder.Component.JobManagerDeployment);
+                EventRecorder.Component.JobManagerDeployment,
+                ctx.getKubernetesClient());
     }
 
     @Override
@@ -199,15 +198,12 @@ public class FlinkDeploymentController
     @Override
     public ErrorStatusUpdateControl<FlinkDeployment> updateErrorStatus(
             FlinkDeployment flinkDeployment, Context<FlinkDeployment> context, Exception e) {
-        return ReconciliationUtils.toErrorStatusUpdateControl(
-                flinkDeployment,
-                context.getRetryInfo(),
-                e,
-                statusRecorder,
-                configManager.getOperatorConfiguration());
+        var ctx = ctxFactory.getResourceContext(flinkDeployment, context);
+        return ReconciliationUtils.toErrorStatusUpdateControl(ctx, e, statusRecorder);
     }
 
-    private boolean validateDeployment(FlinkDeployment deployment) {
+    private boolean validateDeployment(FlinkResourceContext<FlinkDeployment> ctx) {
+        var deployment = ctx.getResource();
         for (FlinkResourceValidator validator : validators) {
             Optional<String> validationError = validator.validateDeployment(deployment);
             if (validationError.isPresent()) {
@@ -216,11 +212,10 @@ public class FlinkDeploymentController
                         EventRecorder.Type.Warning,
                         EventRecorder.Reason.ValidationError,
                         EventRecorder.Component.Operator,
-                        validationError.get());
-                return ReconciliationUtils.applyValidationErrorAndResetSpec(
-                        deployment,
                         validationError.get(),
-                        configManager.getOperatorConfiguration());
+                        ctx.getKubernetesClient());
+                return ReconciliationUtils.applyValidationErrorAndResetSpec(
+                        ctx, validationError.get());
             }
         }
         return true;

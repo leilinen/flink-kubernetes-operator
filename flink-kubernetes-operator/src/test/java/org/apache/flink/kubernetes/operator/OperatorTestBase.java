@@ -24,7 +24,6 @@ import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
 import org.apache.flink.kubernetes.operator.utils.EventCollector;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
-import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
@@ -33,11 +32,12 @@ import org.junit.jupiter.api.BeforeEach;
 /** @link JobStatusObserver unit tests */
 public abstract class OperatorTestBase {
 
-    protected FlinkConfigManager configManager = new FlinkConfigManager(new Configuration());
+    protected Configuration conf = new Configuration();
+    protected FlinkConfigManager configManager = new FlinkConfigManager(conf);
     protected TestingFlinkService flinkService;
     protected EventCollector eventCollector = new EventCollector();
     protected EventRecorder eventRecorder;
-    protected StatusRecorder statusRecorder = new TestingStatusRecorder();
+    protected TestingStatusRecorder statusRecorder = new TestingStatusRecorder();
     protected KubernetesOperatorMetricGroup operatorMetricGroup;
 
     protected Context<?> context;
@@ -48,7 +48,7 @@ public abstract class OperatorTestBase {
         getKubernetesClient().resource(TestUtils.buildSessionJob()).createOrReplace();
         flinkService = new TestingFlinkService(getKubernetesClient());
         context = flinkService.getContext();
-        eventRecorder = new EventRecorder(getKubernetesClient(), eventCollector);
+        eventRecorder = new EventRecorder(eventCollector);
         operatorMetricGroup = TestUtils.createTestMetricGroup(configManager.getDefaultConfig());
         setup();
     }
@@ -66,7 +66,7 @@ public abstract class OperatorTestBase {
             CR cr, Context josdkContext) {
         var ctxFactory =
                 new TestingFlinkResourceContextFactory(
-                        getKubernetesClient(), configManager, operatorMetricGroup, flinkService);
+                        configManager, operatorMetricGroup, flinkService, eventRecorder);
         return ctxFactory.getResourceContext(cr, josdkContext);
     }
 }

@@ -50,6 +50,24 @@ defaultConfiguration:
 
 To learn more about metrics and logging configuration please refer to the dedicated [docs page]({{< ref "docs/operations/metrics-logging" >}}).
 
+### Flink Version and Namespace specific defaults
+
+The operator also supports default configuration overrides for selected Flink versions and namespaces. This can be important if some behaviour changed across Flink versions or we want to treat certain namespaces differently (such as reconcile it more or less frequently etc).
+
+```
+# Flink Version specific defaults 
+kubernetes.operator.default-configuration.flink-version.v1_17.k1: v1
+kubernetes.operator.default-configuration.flink-version.v1_17.k2: v2
+kubernetes.operator.default-configuration.flink-version.v1_17.k3: v3
+
+# Namespace specific defaults
+kubernetes.operator.default-configuration.namespace.ns1.k1: v1
+kubernetes.operator.default-configuration.namespace.ns1.k2: v2
+kubernetes.operator.default-configuration.namespace.ns2.k1: v1
+```
+
+Flink version specific defaults will have a higher precedence so namespace defaults would be overridden by the same key.
+
 ## Dynamic Operator Configuration
 
 The Kubernetes operator supports dynamic config changes through the operator ConfigMaps. Dynamic operator configuration is enabled by default, and can be disabled by setting `kubernetes.operator.dynamic.config.enabled` to false. Time interval for checking dynamic config changes is specified by `kubernetes.operator.dynamic.config.check.interval` of which default value is 5 minutes.
@@ -112,6 +130,8 @@ These options can be configured on both an operator and a per-resource level. Wh
 
 Like other resource options these can be configured on both an operator and a per-resource level. When set under `spec.flinkConfiguration` for the Flink resources it will override the default value provided in the operator default configuration (`flink-conf.yaml`).
 
+> Note: The option prefix `kubernetes.operator.` was removed in FLIP-334, because the autoscaler module was decoupled from flink-kubernetes-operator.
+
 {{< generated/auto_scaler_configuration >}}
 
 ### System Metrics Configuration
@@ -125,3 +145,11 @@ Operator system metrics configuration. Cannot be overridden on a per-resource ba
 Advanced operator system configuration. Cannot be overridden on a per-resource basis.
 
 {{< generated/system_advanced_section >}}
+
+### IPV6 Configuration
+
+If you run Flink Operator in IPV6 environment, the [host name verification error](https://issues.apache.org/jira/browse/FLINK-32777) will be triggered
+due to a known bug in Okhttp client. As a workaround before new Okhttp 5.0.0 release, the environment variable below needs to be set 
+for both Flink Operator and Flink Deployment Configuration.
+
+KUBERNETES_DISABLE_HOSTNAME_VERIFICATION=true

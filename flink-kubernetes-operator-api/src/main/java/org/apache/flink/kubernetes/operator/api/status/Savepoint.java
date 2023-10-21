@@ -28,7 +28,7 @@ import javax.annotation.Nullable;
 @Experimental
 @Data
 @NoArgsConstructor
-public class Savepoint {
+public class Savepoint implements Snapshot {
     /** Millisecond timestamp at the start of the savepoint operation. */
     private long timeStamp;
 
@@ -36,21 +36,21 @@ public class Savepoint {
     private String location;
 
     /** Savepoint trigger mechanism. */
-    private SavepointTriggerType triggerType = SavepointTriggerType.UNKNOWN;
+    private SnapshotTriggerType triggerType = SnapshotTriggerType.UNKNOWN;
 
     /** Savepoint format. */
     private SavepointFormatType formatType = SavepointFormatType.UNKNOWN;
 
     /**
      * Nonce value used when the savepoint was triggered manually {@link
-     * SavepointTriggerType#MANUAL}, null for other types of savepoints.
+     * SnapshotTriggerType#MANUAL}, null for other types of savepoints.
      */
     private Long triggerNonce;
 
     public Savepoint(
             long timeStamp,
             String location,
-            @Nullable SavepointTriggerType triggerType,
+            @Nullable SnapshotTriggerType triggerType,
             @Nullable SavepointFormatType formatType,
             @Nullable Long triggerNonce) {
         this.timeStamp = timeStamp;
@@ -64,11 +64,11 @@ public class Savepoint {
         this.triggerNonce = triggerNonce;
     }
 
-    public static Savepoint of(String location, long timeStamp, SavepointTriggerType triggerType) {
+    public static Savepoint of(String location, long timeStamp, SnapshotTriggerType triggerType) {
         return new Savepoint(timeStamp, location, triggerType, SavepointFormatType.UNKNOWN, null);
     }
 
-    public static Savepoint of(String location, SavepointTriggerType triggerType) {
+    public static Savepoint of(String location, SnapshotTriggerType triggerType) {
         return new Savepoint(
                 System.currentTimeMillis(),
                 location,
@@ -78,7 +78,7 @@ public class Savepoint {
     }
 
     public static Savepoint of(
-            String location, SavepointTriggerType triggerType, SavepointFormatType formatType) {
+            String location, SnapshotTriggerType triggerType, SavepointFormatType formatType) {
         return new Savepoint(System.currentTimeMillis(), location, triggerType, formatType, null);
     }
 }

@@ -20,6 +20,7 @@ package org.apache.flink.kubernetes.operator.reconciler.deployment;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.autoscaler.NoopJobAutoscaler;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
@@ -35,7 +36,7 @@ import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatu
 import org.apache.flink.kubernetes.operator.api.status.JobStatus;
 import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.api.status.Savepoint;
-import org.apache.flink.kubernetes.operator.api.status.SavepointTriggerType;
+import org.apache.flink.kubernetes.operator.api.status.SnapshotTriggerType;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.exception.RecoveryFailureException;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
@@ -78,10 +79,7 @@ public class ApplicationReconcilerUpgradeModeTest extends OperatorTestBase {
                 new TestReconcilerAdapter<>(
                         this,
                         new ApplicationReconciler(
-                                kubernetesClient,
-                                eventRecorder,
-                                statusRecorder,
-                                new NoopJobAutoscalerFactory()));
+                                eventRecorder, statusRecorder, new NoopJobAutoscaler<>()));
     }
 
     @ParameterizedTest
@@ -163,7 +161,7 @@ public class ApplicationReconcilerUpgradeModeTest extends OperatorTestBase {
         assertEquals(1, flinkService.getRunningCount());
         assertEquals("savepoint_0", runningJobs.get(0).f0);
         assertEquals(
-                SavepointTriggerType.UPGRADE,
+                SnapshotTriggerType.UPGRADE,
                 modifiedDeployment
                         .getStatus()
                         .getJobStatus()
@@ -235,7 +233,7 @@ public class ApplicationReconcilerUpgradeModeTest extends OperatorTestBase {
                 .getStatus()
                 .getJobStatus()
                 .getSavepointInfo()
-                .setLastSavepoint(Savepoint.of("finished_sp", SavepointTriggerType.UPGRADE));
+                .setLastSavepoint(Savepoint.of("finished_sp", SnapshotTriggerType.UPGRADE));
         deployment.getStatus().getJobStatus().setState("FINISHED");
         deployment.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.READY);
         deployment

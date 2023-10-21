@@ -23,10 +23,15 @@ import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.api.status.Checkpoint;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.Savepoint;
+import org.apache.flink.kubernetes.operator.api.status.SnapshotTriggerType;
 import org.apache.flink.kubernetes.operator.api.utils.BaseTestUtils;
+import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.health.CanaryResourceManager;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
+import org.apache.flink.kubernetes.operator.reconciler.SnapshotType;
 import org.apache.flink.runtime.metrics.MetricRegistry;
 import org.apache.flink.runtime.metrics.util.TestingMetricRegistry;
 
@@ -66,12 +71,14 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -81,6 +88,7 @@ import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 /** Testing utilities. */
 public class TestUtils extends BaseTestUtils {
+    public static final int MAX_RECONCILE_TIMES = 3;
 
     private static final String TEST_PLUGINS = "test-plugins";
     private static final String PlUGINS_JAR = TEST_PLUGINS + "-test-jar.jar";
@@ -140,33 +148,55 @@ public class TestUtils extends BaseTestUtils {
     }
 
     public static <T extends HasMetadata> Context<T> createContextWithDeployment(
-            @Nullable Deployment deployment) {
+            @Nullable Deployment deployment, KubernetesClient client) {
         return new TestingContext<>() {
             @Override
             public Optional<T> getSecondaryResource(Class expectedType, String eventSourceName) {
                 return (Optional<T>) Optional.ofNullable(deployment);
             }
+
+            @Override
+            public KubernetesClient getClient() {
+                return client;
+            }
         };
     }
 
     public static <T extends HasMetadata> Context<T> createEmptyContext() {
-        return createContextWithDeployment(null);
+        return createContextWithDeployment(null, null);
     }
 
-    public static <T extends HasMetadata> Context<T> createContextWithReadyJobManagerDeployment() {
-        return createContextWithDeployment(createDeployment(true));
+    public static <T extends HasMetadata> Context<T> createEmptyContextWithClient(
+            KubernetesClient client) {
+        return createContextWithDeployment(null, client);
     }
 
-    public static <T extends HasMetadata> Context<T> createContextWithInProgressDeployment() {
-        return createContextWithDeployment(createDeployment(false));
+    public static <T extends HasMetadata> Context<T> createContextWithReadyJobManagerDeployment(
+            KubernetesClient client) {
+        return createContextWithDeployment(createDeployment(true), client);
+    }
+
+    public static <T extends HasMetadata> Context<T> createContextWithInProgressDeployment(
+            KubernetesClient client) {
+        return createContextWithDeployment(createDeployment(false), client);
     }
 
     public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment() {
-        return createContextWithReadyFlinkDeployment(new HashMap<>());
+        return createContextWithReadyFlinkDeployment(new HashMap<>(), null);
+    }
+
+    public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment(
+            KubernetesClient client) {
+        return createContextWithReadyFlinkDeployment(new HashMap<>(), client);
     }
 
     public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment(
             Map<String, String> flinkDepConfig) {
+        return createContextWithReadyFlinkDeployment(flinkDepConfig, null);
+    }
+
+    public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment(
+            Map<String, String> flinkDepConfig, KubernetesClient client) {
         return new TestingContext<>() {
             @Override
             public Optional<T> getSecondaryResource(Class expectedType, String eventSourceName) {
@@ -177,6 +207,11 @@ public class TestUtils extends BaseTestUtils {
                         .getReconciliationStatus()
                         .serializeAndSetLastReconciledSpec(session.getSpec(), session);
                 return (Optional<T>) Optional.of(session);
+            }
+
+            @Override
+            public KubernetesClient getClient() {
+                return client;
             }
         };
     }
@@ -195,7 +230,8 @@ public class TestUtils extends BaseTestUtils {
 
     public static final String DEPLOYMENT_ERROR = "test deployment error message";
 
-    public static <T extends HasMetadata> Context<T> createContextWithFailedJobManagerDeployment() {
+    public static <T extends HasMetadata> Context<T> createContextWithFailedJobManagerDeployment(
+            KubernetesClient client) {
         return new TestingContext<>() {
             @Override
             public Optional getSecondaryResource(Class expectedType, String eventSourceName) {
@@ -218,6 +254,11 @@ public class TestUtils extends BaseTestUtils {
                 deployment.setSpec(spec);
                 deployment.setStatus(status);
                 return Optional.of(deployment);
+            }
+
+            @Override
+            public KubernetesClient getClient() {
+                return client;
             }
         };
     }
@@ -292,7 +333,10 @@ public class TestUtils extends BaseTestUtils {
     }
 
     public static Stream<Arguments> flinkVersions() {
-        return Stream.of(arguments(FlinkVersion.v1_14), arguments(FlinkVersion.v1_15));
+        return Stream.of(
+                arguments(FlinkVersion.v1_14),
+                arguments(FlinkVersion.v1_15),
+                arguments(FlinkVersion.v1_17));
     }
 
     public static FlinkDeployment createCanaryDeployment() {
@@ -317,6 +361,54 @@ public class TestUtils extends BaseTestUtils {
         meta.setNamespace("default");
         cr.setMetadata(meta);
         return cr;
+    }
+
+    public static void reconcileSpec(FlinkDeployment deployment) {
+        deployment
+                .getStatus()
+                .getReconciliationStatus()
+                .serializeAndSetLastReconciledSpec(deployment.getSpec(), deployment);
+    }
+
+    /**
+     * Sets up an active cron trigger by ensuring that the latest successful snapshot happened
+     * earlier than the scheduled trigger.
+     */
+    public static void setupCronTrigger(SnapshotType snapshotType, FlinkDeployment deployment) {
+
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2022, Calendar.JUNE, 5, 11, 0);
+        long lastCheckpointTimestamp = calendar.getTimeInMillis();
+
+        String cronOptionKey;
+
+        switch (snapshotType) {
+            case SAVEPOINT:
+                Savepoint lastSavepoint =
+                        Savepoint.of("", lastCheckpointTimestamp, SnapshotTriggerType.PERIODIC);
+                deployment
+                        .getStatus()
+                        .getJobStatus()
+                        .getSavepointInfo()
+                        .updateLastSavepoint(lastSavepoint);
+                cronOptionKey = KubernetesOperatorConfigOptions.PERIODIC_SAVEPOINT_INTERVAL.key();
+                break;
+            case CHECKPOINT:
+                Checkpoint lastCheckpoint =
+                        Checkpoint.of(lastCheckpointTimestamp, SnapshotTriggerType.PERIODIC);
+                deployment
+                        .getStatus()
+                        .getJobStatus()
+                        .getCheckpointInfo()
+                        .updateLastCheckpoint(lastCheckpoint);
+                cronOptionKey = KubernetesOperatorConfigOptions.PERIODIC_CHECKPOINT_INTERVAL.key();
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported snapshot type: " + snapshotType);
+        }
+
+        deployment.getSpec().getFlinkConfiguration().put(cronOptionKey, "0 0 12 5 6 ? 2022");
+        reconcileSpec(deployment);
     }
 
     /** Testing ResponseProvider. */
@@ -401,6 +493,11 @@ public class TestUtils extends BaseTestUtils {
 
         @Override
         public KubernetesClient getClient() {
+            throw new UnsupportedOperationException("Not implemented");
+        }
+
+        @Override
+        public ExecutorService getWorkflowExecutorService() {
             throw new UnsupportedOperationException("Not implemented");
         }
     }

@@ -28,14 +28,14 @@ import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkSessionJobSpec;
 import org.apache.flink.kubernetes.operator.api.status.FlinkSessionJobStatus;
 import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
-import org.apache.flink.kubernetes.operator.api.status.SavepointTriggerType;
+import org.apache.flink.kubernetes.operator.api.status.SnapshotTriggerType;
 import org.apache.flink.kubernetes.operator.observer.JobStatusObserver;
 import org.apache.flink.kubernetes.operator.observer.TestObserverAdapter;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.reconciler.TestReconcilerAdapter;
 import org.apache.flink.kubernetes.operator.reconciler.sessionjob.SessionJobReconciler;
 import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
-import org.apache.flink.kubernetes.operator.utils.SavepointUtils;
+import org.apache.flink.kubernetes.operator.utils.SnapshotUtils;
 import org.apache.flink.runtime.client.JobStatusMessage;
 
 import io.fabric8.kubernetes.client.KubernetesClient;
@@ -47,6 +47,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -62,20 +63,16 @@ public class FlinkSessionJobObserverTest extends OperatorTestBase {
 
     @Override
     public void setup() {
-        observer =
-                new TestObserverAdapter<>(
-                        this, new FlinkSessionJobObserver(configManager, eventRecorder));
+        observer = new TestObserverAdapter<>(this, new FlinkSessionJobObserver(eventRecorder));
         reconciler =
                 new TestReconcilerAdapter<>(
-                        this,
-                        new SessionJobReconciler(
-                                kubernetesClient, eventRecorder, statusRecorder, configManager));
+                        this, new SessionJobReconciler(eventRecorder, statusRecorder));
     }
 
     @Test
     public void testBasicObserve() throws Exception {
         final var sessionJob = TestUtils.buildSessionJob();
-        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment();
+        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient);
 
         // observe the brand new job, nothing to do.
         observer.observe(sessionJob, readyContext);
@@ -169,7 +166,7 @@ public class FlinkSessionJobObserverTest extends OperatorTestBase {
         final var sessionJob = TestUtils.buildSessionJob();
         final var readyContext =
                 TestUtils.createContextWithReadyFlinkDeployment(
-                        Map.of(RestOptions.PORT.key(), "8088"));
+                        Map.of(RestOptions.PORT.key(), "8088"), kubernetesClient);
 
         // submit job
         reconciler.reconcile(sessionJob, readyContext);
@@ -189,7 +186,7 @@ public class FlinkSessionJobObserverTest extends OperatorTestBase {
     @Test
     public void testObserveSavepoint() throws Exception {
         final var sessionJob = TestUtils.buildSessionJob();
-        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment();
+        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient);
         // submit job
         reconciler.reconcile(sessionJob, readyContext);
         var jobID = sessionJob.getStatus().getJobStatus().getJobId();
@@ -203,40 +200,79 @@ public class FlinkSessionJobObserverTest extends OperatorTestBase {
 
         var savepointInfo = sessionJob.getStatus().getJobStatus().getSavepointInfo();
         Assertions.assertFalse(
-                SavepointUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
+                SnapshotUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
 
         Long firstNonce = 123L;
         sessionJob.getSpec().getJob().setSavepointTriggerNonce(firstNonce);
         flinkService.triggerSavepoint(
-                jobID, SavepointTriggerType.MANUAL, savepointInfo, new Configuration());
+                jobID, SnapshotTriggerType.MANUAL, savepointInfo, new Configuration());
         Assertions.assertTrue(
-                SavepointUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
-        Assertions.assertEquals("trigger_0", savepointInfo.getTriggerId());
+                SnapshotUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
+        Assertions.assertEquals("savepoint_trigger_0", savepointInfo.getTriggerId());
 
         Long secondNonce = 456L;
         sessionJob.getSpec().getJob().setSavepointTriggerNonce(secondNonce);
         flinkService.triggerSavepoint(
-                jobID, SavepointTriggerType.MANUAL, savepointInfo, new Configuration());
+                jobID, SnapshotTriggerType.MANUAL, savepointInfo, new Configuration());
         Assertions.assertTrue(
-                SavepointUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
-        Assertions.assertEquals("trigger_1", savepointInfo.getTriggerId());
+                SnapshotUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
+        Assertions.assertEquals("savepoint_trigger_1", savepointInfo.getTriggerId());
         flinkService.triggerSavepoint(
-                jobID, SavepointTriggerType.MANUAL, savepointInfo, new Configuration());
+                jobID, SnapshotTriggerType.MANUAL, savepointInfo, new Configuration());
         Assertions.assertTrue(
-                SavepointUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
+                SnapshotUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
         observer.observe(sessionJob, readyContext); // pending
         observer.observe(sessionJob, readyContext); // success
         Assertions.assertEquals("savepoint_0", savepointInfo.getLastSavepoint().getLocation());
         Assertions.assertEquals(secondNonce, savepointInfo.getLastSavepoint().getTriggerNonce());
         Assertions.assertFalse(
-                SavepointUtils.savepointInProgress(sessionJob.getStatus().getJobStatus()));
+                SnapshotUtils.checkpointInProgress(sessionJob.getStatus().getJobStatus()));
+    }
+
+    @Test
+    public void testObserveCheckpoint() throws Exception {
+        final var sessionJob = TestUtils.buildSessionJob();
+        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient);
+        // submit job
+        reconciler.reconcile(sessionJob, readyContext);
+        var jobID = sessionJob.getStatus().getJobStatus().getJobId();
+        Assertions.assertNotNull(jobID);
+        Assertions.assertEquals(
+                JobStatus.RECONCILING.name(), sessionJob.getStatus().getJobStatus().getState());
+
+        observer.observe(sessionJob, readyContext);
+        assertEquals(JobStatus.RUNNING.name(), sessionJob.getStatus().getJobStatus().getState());
+
+        var checkpointInfo = sessionJob.getStatus().getJobStatus().getCheckpointInfo();
+        assertFalse(SnapshotUtils.checkpointInProgress(sessionJob.getStatus().getJobStatus()));
+
+        Long firstNonce = 123L;
+        sessionJob.getSpec().getJob().setCheckpointTriggerNonce(firstNonce);
+        flinkService.triggerCheckpoint(
+                jobID, SnapshotTriggerType.MANUAL, checkpointInfo, new Configuration());
+        assertTrue(SnapshotUtils.checkpointInProgress(sessionJob.getStatus().getJobStatus()));
+        assertEquals("checkpoint_trigger_0", checkpointInfo.getTriggerId());
+
+        Long secondNonce = 456L;
+        sessionJob.getSpec().getJob().setCheckpointTriggerNonce(secondNonce);
+        flinkService.triggerCheckpoint(
+                jobID, SnapshotTriggerType.MANUAL, checkpointInfo, new Configuration());
+        assertTrue(SnapshotUtils.checkpointInProgress(sessionJob.getStatus().getJobStatus()));
+        assertEquals("checkpoint_trigger_1", checkpointInfo.getTriggerId());
+        flinkService.triggerCheckpoint(
+                jobID, SnapshotTriggerType.MANUAL, checkpointInfo, new Configuration());
+        assertTrue(SnapshotUtils.checkpointInProgress(sessionJob.getStatus().getJobStatus()));
+        observer.observe(sessionJob, readyContext); // pending
+        observer.observe(sessionJob, readyContext); // success
+        assertEquals(secondNonce, checkpointInfo.getLastCheckpoint().getTriggerNonce());
+        assertFalse(SnapshotUtils.checkpointInProgress(sessionJob.getStatus().getJobStatus()));
     }
 
     @Test
     public void testObserveAlreadySubmitted() {
         final var sessionJob = TestUtils.buildSessionJob();
         sessionJob.getMetadata().setGeneration(10L);
-        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment();
+        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient);
 
         flinkService.setSessionJobSubmittedCallback(
                 () -> {
@@ -266,7 +302,7 @@ public class FlinkSessionJobObserverTest extends OperatorTestBase {
     public void testObserveAlreadyUpgraded() throws Exception {
         final var sessionJob = TestUtils.buildSessionJob();
         sessionJob.getMetadata().setGeneration(10L);
-        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment();
+        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient);
 
         reconciler.reconcile(sessionJob, readyContext);
         observer.observe(sessionJob, readyContext);
@@ -317,7 +353,7 @@ public class FlinkSessionJobObserverTest extends OperatorTestBase {
     public void testOrphanedJob() throws Exception {
         final var sessionJob = TestUtils.buildSessionJob();
         sessionJob.getMetadata().setGeneration(10L);
-        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment();
+        final var readyContext = TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient);
 
         reconciler.reconcile(sessionJob, readyContext);
         observer.observe(sessionJob, readyContext);
@@ -382,7 +418,8 @@ public class FlinkSessionJobObserverTest extends OperatorTestBase {
         ReconciliationUtils.updateStatusBeforeDeploymentAttempt(sessionJob, new Configuration());
 
         assertFalse(sessionJob.getStatus().getReconciliationStatus().isBeforeFirstDeployment());
-        observer.observe(sessionJob, TestUtils.createContextWithReadyFlinkDeployment());
+        observer.observe(
+                sessionJob, TestUtils.createContextWithReadyFlinkDeployment(kubernetesClient));
         assertTrue(sessionJob.getStatus().getReconciliationStatus().isBeforeFirstDeployment());
     }
 }

@@ -38,7 +38,7 @@ import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobStatus;
 import org.apache.flink.kubernetes.operator.api.status.Savepoint;
-import org.apache.flink.kubernetes.operator.api.status.SavepointTriggerType;
+import org.apache.flink.kubernetes.operator.api.status.SnapshotTriggerType;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
@@ -82,9 +82,9 @@ public class DefaultValidatorTest {
                 dep -> dep.getMetadata().setName("session-cluster-1.13"),
                 "The FlinkDeployment name: session-cluster-1.13 is invalid, must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123'), and the length must be no more than 45 characters.");
 
-        testError(
-                dep -> dep.getSpec().getJob().setState(JobState.SUSPENDED),
-                "Job must start in running state");
+        testSuccess(dep -> dep.getSpec().getJob().setState(JobState.SUSPENDED));
+
+        testSuccess(dep -> dep.getSpec().getJob().setState(JobState.RUNNING));
 
         testError(
                 dep -> dep.getSpec().getJob().setParallelism(0),
@@ -283,6 +283,10 @@ public class DefaultValidatorTest {
         testSuccess(dep -> dep.getSpec().getTaskManager().getResource().setMemory("1G"));
         testSuccess(dep -> dep.getSpec().getTaskManager().getResource().setMemory("100"));
 
+        // Test resource validation with k8s specification
+        testSuccess(dep -> dep.getSpec().getJobManager().getResource().setMemory("1Gi"));
+        testSuccess(dep -> dep.getSpec().getTaskManager().getResource().setMemory("1Gi"));
+
         testError(
                 dep -> dep.getSpec().getTaskManager().getResource().setMemory("invalid"),
                 "TaskManager resource memory parse error");
@@ -332,7 +336,7 @@ public class DefaultValidatorTest {
                     dep.getStatus()
                             .getJobStatus()
                             .getSavepointInfo()
-                            .setLastSavepoint(Savepoint.of("sp", SavepointTriggerType.UPGRADE));
+                            .setLastSavepoint(Savepoint.of("sp", SnapshotTriggerType.UPGRADE));
 
                     dep.getStatus()
                             .setReconciliationStatus(new FlinkDeploymentReconciliationStatus());
@@ -614,11 +618,6 @@ public class DefaultValidatorTest {
                 sessionJob -> sessionJob.getSpec().getJob().setUpgradeMode(UpgradeMode.LAST_STATE),
                 flinkDeployment -> {},
                 "The LAST_STATE upgrade mode is not supported in session job now.");
-
-        testSessionJobValidateWithModifier(
-                sessionJob -> sessionJob.getSpec().getJob().setState(JobState.SUSPENDED),
-                flinkDeployment -> {},
-                "Job must start in running state");
 
         testSessionJobValidateWithModifier(
                 sessionJob ->

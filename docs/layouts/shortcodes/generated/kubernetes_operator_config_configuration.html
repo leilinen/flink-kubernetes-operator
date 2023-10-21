@@ -9,6 +9,18 @@
     </thead>
     <tbody>
         <tr>
+            <td><h5>kubernetes.operator.checkpoint.trigger.grace-period</h5></td>
+            <td style="word-wrap: break-word;">1 min</td>
+            <td>Duration</td>
+            <td>The interval before a checkpoint trigger attempt is marked as unsuccessful.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.checkpoint.type</h5></td>
+            <td style="word-wrap: break-word;">FULL</td>
+            <td><p>Enum</p></td>
+            <td>Type of checkpoint.<br /><br />Possible values:<ul><li>"FULL": A comprehensive snapshot, saving the complete state of a data stream.</li><li>"INCREMENTAL": A more efficient, reduced snapshot, saving only the differences in state data since the last checkpoint.</li><li>"UNKNOWN": Only for internal purposes.</li></ul></td>
+        </tr>
+        <tr>
             <td><h5>kubernetes.operator.cluster.health-check.checkpoint-progress.enabled</h5></td>
             <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
@@ -87,6 +99,12 @@
             <td>Maximum length of each exception field including stack trace to be included in CR status error field.</td>
         </tr>
         <tr>
+            <td><h5>kubernetes.operator.exception.label.mapper</h5></td>
+            <td style="word-wrap: break-word;"></td>
+            <td>Map</td>
+            <td>Key-Value pair where key is the REGEX to filter through the exception messages and value is the string to be included in CR status error label field if the REGEX matches. Expected format: headerKey1:headerValue1,headerKey2:headerValue2.</td>
+        </tr>
+        <tr>
             <td><h5>kubernetes.operator.exception.stacktrace.enabled</h5></td>
             <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
@@ -147,16 +165,40 @@
             <td>Time after which jobmanager pods of terminal application deployments are shut down.</td>
         </tr>
         <tr>
+            <td><h5>kubernetes.operator.jm-deployment.startup.probe.enabled</h5></td>
+            <td style="word-wrap: break-word;">true</td>
+            <td>Boolean</td>
+            <td>Enable job manager startup probe to allow detecting when the jobmanager could not submit the job.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.job.drain-on-savepoint-deletion</h5></td>
+            <td style="word-wrap: break-word;">false</td>
+            <td>Boolean</td>
+            <td>Indicate whether the job should be drained when stopping with savepoint.</td>
+        </tr>
+        <tr>
             <td><h5>kubernetes.operator.job.restart.failed</h5></td>
             <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
             <td>Whether to restart failed jobs.</td>
         </tr>
         <tr>
+            <td><h5>kubernetes.operator.job.savepoint-on-deletion</h5></td>
+            <td style="word-wrap: break-word;">false</td>
+            <td>Boolean</td>
+            <td>Indicate whether a savepoint must be taken when deleting a FlinkDeployment or FlinkSessionJob.</td>
+        </tr>
+        <tr>
             <td><h5>kubernetes.operator.job.upgrade.ignore-pending-savepoint</h5></td>
             <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
             <td>Whether to ignore pending savepoint during job upgrade.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.job.upgrade.inplace-scaling.enabled</h5></td>
+            <td style="word-wrap: break-word;">true</td>
+            <td>Boolean</td>
+            <td>Whether to enable inplace scaling for Flink 1.18+ using the resource requirements API. On failure or earlier Flink versions it falls back to regular full redeployment.</td>
         </tr>
         <tr>
             <td><h5>kubernetes.operator.job.upgrade.last-state-fallback.enabled</h5></td>
@@ -219,16 +261,34 @@
             <td>Final delay before deployment is marked ready after port becomes accessible.</td>
         </tr>
         <tr>
+            <td><h5>kubernetes.operator.periodic.checkpoint.interval</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>Option to enable automatic checkpoint triggering. Can be specified either as a Duration type (i.e. '10m') or as a cron expression in Quartz format (6 or 7 positions, see http://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/crontrigger.html).The triggering schedule is not guaranteed, checkpoints will be triggered as part of the regular reconcile loop. NOTE: checkpoints are generally managed by Flink. This setting isn't meant to replace Flink's checkpoint settings, but to complement them in special cases. For instance, a full checkpoint might need to be occasionally triggered to break the chain of incremental checkpoints and consolidate the partial incremental files. WARNING: not intended to be used together with the cron-based periodic checkpoint triggering</td>
+        </tr>
+        <tr>
             <td><h5>kubernetes.operator.periodic.savepoint.interval</h5></td>
-            <td style="word-wrap: break-word;">0 ms</td>
-            <td>Duration</td>
-            <td>Interval at which periodic savepoints will be triggered. The triggering schedule is not guaranteed, savepoints will be triggered as part of the regular reconcile loop.</td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>Option to enable automatic savepoint triggering. Can be specified either as a Duration type (i.e. '10m') or as a cron expression in Quartz format (6 or 7 positions, see http://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/crontrigger.html).The triggering schedule is not guaranteed, savepoints will be triggered as part of the regular reconcile loop. WARNING: not intended to be used together with the cron-based periodic savepoint triggering</td>
         </tr>
         <tr>
             <td><h5>kubernetes.operator.pod-template.merge-arrays-by-name</h5></td>
             <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
             <td>Configure the array merge behaviour during pod merging. Arrays can be either merged by position or name matching.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.rate-limiter.limit</h5></td>
+            <td style="word-wrap: break-word;">5</td>
+            <td>Integer</td>
+            <td>Max number of reconcile loops triggered within the rate limiter refresh period for each resource. Setting the limit &lt;= 0 disables the limiter.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.rate-limiter.refresh-period</h5></td>
+            <td style="word-wrap: break-word;">15 s</td>
+            <td>Duration</td>
+            <td>Operator rate limiter refresh period for each resource.</td>
         </tr>
         <tr>
             <td><h5>kubernetes.operator.reconcile.interval</h5></td>
@@ -258,19 +318,25 @@
             <td><h5>kubernetes.operator.retry.initial.interval</h5></td>
             <td style="word-wrap: break-word;">5 s</td>
             <td>Duration</td>
-            <td>Initial interval of automatic reconcile retries on recoverable errors.</td>
+            <td>Initial interval of retries on unhandled controller errors.</td>
         </tr>
         <tr>
             <td><h5>kubernetes.operator.retry.interval.multiplier</h5></td>
-            <td style="word-wrap: break-word;">2.0</td>
+            <td style="word-wrap: break-word;">1.5</td>
             <td>Double</td>
-            <td>Interval multiplier of automatic reconcile retries on recoverable errors.</td>
+            <td>Interval multiplier of retries on unhandled controller errors.</td>
         </tr>
         <tr>
             <td><h5>kubernetes.operator.retry.max.attempts</h5></td>
-            <td style="word-wrap: break-word;">10</td>
+            <td style="word-wrap: break-word;">15</td>
             <td>Integer</td>
-            <td>Max attempts of automatic reconcile retries on recoverable errors.</td>
+            <td>Max attempts of retries on unhandled controller errors.</td>
+        </tr>
+        <tr>
+            <td><h5>kubernetes.operator.retry.max.interval</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>Duration</td>
+            <td>Max interval of retries on unhandled controller errors.</td>
         </tr>
         <tr>
             <td><h5>kubernetes.operator.savepoint.cleanup.enabled</h5></td>

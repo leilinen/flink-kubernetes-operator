@@ -19,11 +19,10 @@ package org.apache.flink.kubernetes.operator.observer;
 
 import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
-import org.apache.flink.kubernetes.operator.utils.SavepointUtils;
+import org.apache.flink.kubernetes.operator.utils.SnapshotUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,12 +33,9 @@ public abstract class AbstractFlinkResourceObserver<CR extends AbstractFlinkReso
 
     protected final Logger logger = LoggerFactory.getLogger(this.getClass());
 
-    protected final FlinkConfigManager configManager;
     protected final EventRecorder eventRecorder;
 
-    public AbstractFlinkResourceObserver(
-            FlinkConfigManager configManager, EventRecorder eventRecorder) {
-        this.configManager = configManager;
+    public AbstractFlinkResourceObserver(EventRecorder eventRecorder) {
         this.eventRecorder = eventRecorder;
     }
 
@@ -52,7 +48,8 @@ public abstract class AbstractFlinkResourceObserver<CR extends AbstractFlinkReso
         // Trigger resource specific observe logic
         observeInternal(ctx);
 
-        SavepointUtils.resetTriggerIfJobNotRunning(ctx.getResource(), eventRecorder);
+        SnapshotUtils.resetSnapshotTriggers(
+                ctx.getResource(), eventRecorder, ctx.getKubernetesClient());
     }
 
     /**
@@ -79,8 +76,14 @@ public abstract class AbstractFlinkResourceObserver<CR extends AbstractFlinkReso
         // We are in the middle or possibly right after an upgrade
         if (reconciliationStatus.getState() == ReconciliationState.UPGRADING) {
             // We must check if the upgrade went through without the status upgrade for some reason
-            updateStatusToDeployedIfAlreadyUpgraded(ctx);
-            if (reconciliationStatus.getState() == ReconciliationState.UPGRADING) {
+
+            if (reconciliationStatus.scalingInProgress()) {
+                if (ctx.getFlinkService().scalingCompleted(ctx)) {
+                    reconciliationStatus.setState(ReconciliationState.DEPLOYED);
+                }
+            } else if (checkIfAlreadyUpgraded(ctx)) {
+                ReconciliationUtils.updateStatusForAlreadyUpgraded(resource);
+            } else {
                 ReconciliationUtils.clearLastReconciledSpecIfFirstDeploy(resource);
                 logger.debug("Skipping observe before resource is deployed during upgrade");
                 return false;
@@ -105,5 +108,5 @@ public abstract class AbstractFlinkResourceObserver<CR extends AbstractFlinkReso
      *
      * @param ctx Context for resource.
      */
-    protected abstract void updateStatusToDeployedIfAlreadyUpgraded(FlinkResourceContext<CR> ctx);
+    protected abstract boolean checkIfAlreadyUpgraded(FlinkResourceContext<CR> ctx);
 }

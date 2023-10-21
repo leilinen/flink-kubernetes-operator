@@ -65,10 +65,18 @@ operatorPod:
   env:
   # - name: ""
   #   value: ""
+  # - name: ""
+  #   valueFrom:
+  #     configMapKeyRef:
+  #       name: ""
+  #       key: ""
   # dnsPolicy: ""
   # dnsConfig: {}
   # Node labels for operator pod assignment
   # https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/
+  envFrom:
+  # - configMapRef:
+  #     name: ""
   nodeSelector: {}
   # Node tolerations for operator pod assignment
   # https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
@@ -183,3 +191,6 @@ operatorHealth:
   startupProbe:
     failureThreshold: 30
     periodSeconds: 10
+
+# Set postStart hook of the main container
+postStart: {}

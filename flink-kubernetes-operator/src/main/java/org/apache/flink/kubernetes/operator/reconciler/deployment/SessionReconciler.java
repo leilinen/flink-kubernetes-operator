@@ -17,22 +17,19 @@
 
 package org.apache.flink.kubernetes.operator.reconciler.deployment;
 
+import org.apache.flink.autoscaler.NoopJobAutoscaler;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
-import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
-import org.apache.flink.kubernetes.operator.api.status.ReconciliationStatus;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.IngressUtils;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.DeleteControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,15 +47,11 @@ public class SessionReconciler
                 FlinkDeployment, FlinkDeploymentSpec, FlinkDeploymentStatus> {
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionReconciler.class);
-    private final FlinkConfigManager configManager;
 
     public SessionReconciler(
-            KubernetesClient kubernetesClient,
             EventRecorder eventRecorder,
-            StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder,
-            FlinkConfigManager configManager) {
-        super(kubernetesClient, eventRecorder, statusRecorder, new NoopJobAutoscalerFactory());
-        this.configManager = configManager;
+            StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder) {
+        super(eventRecorder, statusRecorder, new NoopJobAutoscaler<>());
     }
 
     @Override
@@ -68,14 +61,16 @@ public class SessionReconciler
 
     @Override
     protected boolean reconcileSpecChange(
-            FlinkResourceContext<FlinkDeployment> ctx, Configuration deployConfig)
+            FlinkResourceContext<FlinkDeployment> ctx,
+            Configuration deployConfig,
+            FlinkDeploymentSpec lastReconciledSpec)
             throws Exception {
         var deployment = ctx.getResource();
         deleteSessionCluster(ctx);
 
         // We record the target spec into an upgrading state before deploying
         ReconciliationUtils.updateStatusBeforeDeploymentAttempt(deployment, deployConfig, clock);
-        statusRecorder.patchAndCacheStatus(deployment);
+        statusRecorder.patchAndCacheStatus(deployment, ctx.getKubernetesClient());
 
         deploy(ctx, deployment.getSpec(), deployConfig, Optional.empty(), false);
         ReconciliationUtils.updateStatusForDeployedSpec(deployment, deployConfig, clock);
@@ -103,21 +98,8 @@ public class SessionReconciler
         setOwnerReference(cr, deployConfig);
         ctx.getFlinkService().submitSessionCluster(deployConfig);
         cr.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.DEPLOYING);
-        IngressUtils.updateIngressRules(cr.getMetadata(), spec, deployConfig, kubernetesClient);
-    }
-
-    @Override
-    protected void rollback(FlinkResourceContext<FlinkDeployment> ctx) throws Exception {
-        var deployment = ctx.getResource();
-        FlinkDeploymentStatus status = deployment.getStatus();
-        ReconciliationStatus<FlinkDeploymentSpec> reconciliationStatus =
-                status.getReconciliationStatus();
-        FlinkDeploymentSpec rollbackSpec = reconciliationStatus.deserializeLastStableSpec();
-
-        deleteSessionCluster(ctx);
-        deploy(ctx, rollbackSpec, ctx.getDeployConfig(rollbackSpec), Optional.empty(), false);
-
-        reconciliationStatus.setState(ReconciliationState.ROLLED_BACK);
+        IngressUtils.updateIngressRules(
+                cr.getMetadata(), spec, deployConfig, ctx.getKubernetesClient());
     }
 
     @Override
@@ -154,15 +136,12 @@ public class SessionReconciler
                     EventRecorder.Type.Warning,
                     EventRecorder.Reason.CleanupFailed,
                     EventRecorder.Component.Operator,
-                    error)) {
+                    error,
+                    ctx.getKubernetesClient())) {
                 LOG.warn(error);
             }
             return DeleteControl.noFinalizerRemoval()
-                    .rescheduleAfter(
-                            configManager
-                                    .getOperatorConfiguration()
-                                    .getReconcileInterval()
-                                    .toMillis());
+                    .rescheduleAfter(ctx.getOperatorConfig().getReconcileInterval().toMillis());
         } else {
             LOG.info("Stopping session cluster");
             var conf = ctx.getDeployConfig(ctx.getResource().getSpec());

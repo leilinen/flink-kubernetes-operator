@@ -29,8 +29,10 @@ import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.operator.artifact.ArtifactManager;
+import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.config.Mode;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.kubeclient.Fabric8FlinkStandaloneKubeClient;
 import org.apache.flink.kubernetes.operator.kubeclient.FlinkStandaloneKubeClient;
 import org.apache.flink.kubernetes.operator.standalone.KubernetesStandaloneClusterDescriptor;
@@ -57,8 +59,11 @@ public class StandaloneFlinkService extends AbstractFlinkService {
     private static final Logger LOG = LoggerFactory.getLogger(StandaloneFlinkService.class);
 
     public StandaloneFlinkService(
-            KubernetesClient kubernetesClient, FlinkConfigManager configManager) {
-        super(kubernetesClient, configManager);
+            KubernetesClient kubernetesClient,
+            ArtifactManager artifactManager,
+            ExecutorService executorService,
+            FlinkOperatorConfiguration operatorConfig) {
+        super(kubernetesClient, artifactManager, executorService, operatorConfig);
     }
 
     @Override
@@ -87,6 +92,15 @@ public class StandaloneFlinkService extends AbstractFlinkService {
                 .pods()
                 .inNamespace(namespace)
                 .withLabels(StandaloneKubernetesUtils.getJobManagerSelectors(clusterId))
+                .list();
+    }
+
+    @Override
+    protected PodList getTmPodList(String namespace, String clusterId) {
+        return kubernetesClient
+                .pods()
+                .inNamespace(namespace)
+                .withLabels(StandaloneKubernetesUtils.getTaskManagerSelectors(clusterId))
                 .list();
     }
 
@@ -160,11 +174,14 @@ public class StandaloneFlinkService extends AbstractFlinkService {
     }
 
     @Override
-    public boolean scale(ObjectMeta meta, JobSpec jobSpec, Configuration conf) {
-        if (conf.get(JobManagerOptions.SCHEDULER_MODE) != SchedulerExecutionMode.REACTIVE
+    public ScalingResult scale(FlinkResourceContext<?> ctx, Configuration deployConfig) {
+        var observeConfig = ctx.getObserveConfig();
+        var jobSpec = ctx.getResource().getSpec();
+        var meta = ctx.getResource().getMetadata();
+        if (observeConfig.get(JobManagerOptions.SCHEDULER_MODE) != SchedulerExecutionMode.REACTIVE
                 && jobSpec != null) {
             LOG.info("Reactive scaling is not enabled");
-            return false;
+            return ScalingResult.CANNOT_SCALE;
         }
 
         var clusterId = meta.getName();
@@ -175,24 +192,32 @@ public class StandaloneFlinkService extends AbstractFlinkService {
 
         if (deployment == null || deployment.get() == null) {
             LOG.warn("TM Deployment ({}) not found", name);
-            return false;
+            return ScalingResult.CANNOT_SCALE;
         }
 
         var actualReplicas = deployment.get().getSpec().getReplicas();
         var desiredReplicas =
-                conf.get(StandaloneKubernetesConfigOptionsInternal.KUBERNETES_TASKMANAGER_REPLICAS);
+                deployConfig.get(
+                        StandaloneKubernetesConfigOptionsInternal.KUBERNETES_TASKMANAGER_REPLICAS);
         if (actualReplicas != desiredReplicas) {
             LOG.info(
                     "Scaling TM replicas: actual({}) -> desired({})",
                     actualReplicas,
                     desiredReplicas);
             deployment.scale(desiredReplicas);
+            return ScalingResult.SCALING_TRIGGERED;
         } else {
             LOG.info(
                     "Not scaling TM replicas: actual({}) == desired({})",
                     actualReplicas,
                     desiredReplicas);
+            return ScalingResult.ALREADY_SCALED;
         }
+    }
+
+    @Override
+    public boolean scalingCompleted(FlinkResourceContext<?> resourceContext) {
+        // Currently there is no good way of checking whether reactive scaling has completed or not.
         return true;
     }
 }

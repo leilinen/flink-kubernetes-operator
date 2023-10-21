@@ -17,6 +17,7 @@
 
 package org.apache.flink.kubernetes.operator.reconciler.sessionjob;
 
+import org.apache.flink.autoscaler.NoopJobAutoscaler;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
@@ -24,16 +25,14 @@ import org.apache.flink.kubernetes.operator.api.spec.FlinkSessionJobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.api.status.FlinkSessionJobStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.reconciler.deployment.AbstractJobReconciler;
-import org.apache.flink.kubernetes.operator.reconciler.deployment.NoopJobAutoscalerFactory;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 import org.apache.flink.runtime.messages.FlinkJobNotFoundException;
 import org.apache.flink.runtime.messages.FlinkJobTerminatedWithoutCancellationException;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.DeleteControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,15 +46,10 @@ public class SessionJobReconciler
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionJobReconciler.class);
 
-    private final FlinkConfigManager configManager;
-
     public SessionJobReconciler(
-            KubernetesClient kubernetesClient,
             EventRecorder eventRecorder,
-            StatusRecorder<FlinkSessionJob, FlinkSessionJobStatus> statusRecorder,
-            FlinkConfigManager configManager) {
-        super(kubernetesClient, eventRecorder, statusRecorder, new NoopJobAutoscalerFactory());
-        this.configManager = configManager;
+            StatusRecorder<FlinkSessionJob, FlinkSessionJobStatus> statusRecorder) {
+        super(eventRecorder, statusRecorder, new NoopJobAutoscaler<>());
     }
 
     @Override
@@ -107,7 +101,13 @@ public class SessionJobReconciler
             String jobID = ctx.getResource().getStatus().getJobStatus().getJobId();
             if (jobID != null) {
                 try {
-                    cancelJob(ctx, UpgradeMode.STATELESS);
+                    var observeConfig = ctx.getObserveConfig();
+                    UpgradeMode upgradeMode =
+                            observeConfig.getBoolean(
+                                            KubernetesOperatorConfigOptions.SAVEPOINT_ON_DELETION)
+                                    ? UpgradeMode.SAVEPOINT
+                                    : UpgradeMode.STATELESS;
+                    cancelJob(ctx, upgradeMode);
                 } catch (ExecutionException e) {
                     final var cause = e.getCause();
 
@@ -122,10 +122,7 @@ public class SessionJobReconciler
                     }
 
                     final long delay =
-                            configManager
-                                    .getOperatorConfiguration()
-                                    .getProgressCheckInterval()
-                                    .toMillis();
+                            ctx.getOperatorConfig().getProgressCheckInterval().toMillis();
                     LOG.error(
                             "Failed to cancel job {}, will reschedule after {} milliseconds.",
                             jobID,

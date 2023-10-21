@@ -46,13 +46,12 @@ public class SessionObserverTest extends OperatorTestBase {
     @Getter private KubernetesClient kubernetesClient;
 
     private final Context<FlinkDeployment> readyContext =
-            TestUtils.createContextWithReadyJobManagerDeployment();
+            TestUtils.createContextWithReadyJobManagerDeployment(kubernetesClient);
     private TestObserverAdapter<FlinkDeployment> observer;
 
     @Override
     public void setup() {
-        observer =
-                new TestObserverAdapter<>(this, new SessionObserver(configManager, eventRecorder));
+        observer = new TestObserverAdapter<>(this, new SessionObserver(eventRecorder));
     }
 
     @Test
@@ -107,7 +106,7 @@ public class SessionObserverTest extends OperatorTestBase {
         var kubernetesDeployment = TestUtils.createDeployment(true);
         kubernetesDeployment.getMetadata().setAnnotations(new HashMap<>());
 
-        var context = TestUtils.createContextWithDeployment(kubernetesDeployment);
+        var context = TestUtils.createContextWithDeployment(kubernetesDeployment, kubernetesClient);
 
         FlinkDeployment deployment = TestUtils.buildSessionCluster();
         deployment.getMetadata().setGeneration(123L);

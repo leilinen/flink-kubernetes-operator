@@ -19,6 +19,7 @@ package org.apache.flink.kubernetes.operator.reconciler.deployment;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.JobAutoScaler;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.PipelineOptionsInternal;
@@ -28,6 +29,7 @@ import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.autoscaler.KubernetesJobAutoScalerContext;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.exception.RecoveryFailureException;
@@ -42,9 +44,11 @@ import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 import org.apache.flink.runtime.highavailability.JobResultStoreOptions;
 import org.apache.flink.runtime.jobgraph.SavepointConfigOptions;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
+import org.apache.flink.util.Preconditions;
 
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.DeleteControl;
+import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,11 +68,10 @@ public class ApplicationReconciler
     static final String MSG_RESTART_UNHEALTHY = "Restarting unhealthy job";
 
     public ApplicationReconciler(
-            KubernetesClient kubernetesClient,
             EventRecorder eventRecorder,
             StatusRecorder<FlinkDeployment, FlinkDeploymentStatus> statusRecorder,
-            JobAutoScalerFactory autoscalerFactory) {
-        super(kubernetesClient, eventRecorder, statusRecorder, autoscalerFactory);
+            JobAutoScaler<ResourceID, KubernetesJobAutoScalerContext> autoscaler) {
+        super(eventRecorder, statusRecorder, autoscaler);
     }
 
     @Override
@@ -85,9 +88,13 @@ public class ApplicationReconciler
         }
         var flinkService = ctx.getFlinkService();
 
-        if (deployConfig.getBoolean(
-                        KubernetesOperatorConfigOptions
-                                .OPERATOR_JOB_UPGRADE_LAST_STATE_FALLBACK_ENABLED)
+        boolean lastStateAllowed =
+                deployment.getSpec().getJob().getUpgradeMode() == UpgradeMode.LAST_STATE
+                        || deployConfig.getBoolean(
+                                KubernetesOperatorConfigOptions
+                                        .OPERATOR_JOB_UPGRADE_LAST_STATE_FALLBACK_ENABLED);
+
+        if (lastStateAllowed
                 && HighAvailabilityMode.isHighAvailabilityModeActivated(deployConfig)
                 && HighAvailabilityMode.isHighAvailabilityModeActivated(ctx.getObserveConfig())
                 && !flinkVersionChanged(
@@ -162,34 +169,36 @@ public class ApplicationReconciler
         setRandomJobResultStorePath(deployConfig);
 
         if (status.getJobManagerDeploymentStatus() != JobManagerDeploymentStatus.MISSING) {
-            if (!ReconciliationUtils.isJobInTerminalState(status)) {
-                LOG.error("Invalid status for deployment: {}", status);
-                throw new RuntimeException("This indicates a bug...");
-            }
+            Preconditions.checkArgument(ReconciliationUtils.isJobInTerminalState(status));
             LOG.info("Deleting deployment with terminated application before new deployment");
             flinkService.deleteClusterDeployment(
-                    relatedResource.getMetadata(), status, deployConfig, true);
+                    relatedResource.getMetadata(), status, deployConfig, !requireHaMetadata);
             flinkService.waitForClusterShutdown(deployConfig);
+            statusRecorder.patchAndCacheStatus(relatedResource, ctx.getKubernetesClient());
         }
 
-        setJobIdIfNecessary(spec, relatedResource, deployConfig);
+        setJobIdIfNecessary(spec, relatedResource, deployConfig, ctx.getKubernetesClient());
 
         eventRecorder.triggerEvent(
                 relatedResource,
                 EventRecorder.Type.Normal,
                 EventRecorder.Reason.Submit,
                 EventRecorder.Component.JobManagerDeployment,
-                MSG_SUBMIT);
+                MSG_SUBMIT,
+                ctx.getKubernetesClient());
         flinkService.submitApplicationCluster(spec.getJob(), deployConfig, requireHaMetadata);
         status.getJobStatus().setState(org.apache.flink.api.common.JobStatus.RECONCILING.name());
         status.setJobManagerDeploymentStatus(JobManagerDeploymentStatus.DEPLOYING);
 
         IngressUtils.updateIngressRules(
-                relatedResource.getMetadata(), spec, deployConfig, kubernetesClient);
+                relatedResource.getMetadata(), spec, deployConfig, ctx.getKubernetesClient());
     }
 
     private void setJobIdIfNecessary(
-            FlinkDeploymentSpec spec, FlinkDeployment resource, Configuration deployConfig) {
+            FlinkDeploymentSpec spec,
+            FlinkDeployment resource,
+            Configuration deployConfig,
+            KubernetesClient client) {
         // The jobId assigned by Flink would be constant,
         // overwrite to avoid checkpoint path conflicts.
         // https://issues.apache.org/jira/browse/FLINK-19358
@@ -208,7 +217,7 @@ public class ApplicationReconciler
             // record before first deployment to ensure we use it on any retry
             status.getJobStatus().setJobId(jobId);
             LOG.info("Assigning JobId override to {}", jobId);
-            statusRecorder.patchAndCacheStatus(resource);
+            statusRecorder.patchAndCacheStatus(resource, client);
         }
 
         String jobId = status.getJobStatus().getJobId();
@@ -269,7 +278,8 @@ public class ApplicationReconciler
                         EventRecorder.Type.Warning,
                         EventRecorder.Reason.RecoverDeployment,
                         EventRecorder.Component.Job,
-                        MSG_RECOVERY);
+                        MSG_RECOVERY,
+                        ctx.getKubernetesClient());
             }
 
             if (shouldRestartJobBecauseUnhealthy) {
@@ -278,7 +288,8 @@ public class ApplicationReconciler
                         EventRecorder.Type.Warning,
                         EventRecorder.Reason.RestartUnhealthyJob,
                         EventRecorder.Component.Job,
-                        MSG_RESTART_UNHEALTHY);
+                        MSG_RESTART_UNHEALTHY,
+                        ctx.getKubernetesClient());
                 cleanupAfterFailedJob(ctx);
             }
 
@@ -362,8 +373,12 @@ public class ApplicationReconciler
             ctx.getFlinkService()
                     .deleteClusterDeployment(deployment.getMetadata(), status, conf, true);
         } else {
-            ctx.getFlinkService()
-                    .cancelJob(deployment, UpgradeMode.STATELESS, ctx.getObserveConfig());
+            var observeConfig = ctx.getObserveConfig();
+            UpgradeMode upgradeMode =
+                    observeConfig.getBoolean(KubernetesOperatorConfigOptions.SAVEPOINT_ON_DELETION)
+                            ? UpgradeMode.SAVEPOINT
+                            : UpgradeMode.STATELESS;
+            cancelJob(ctx, upgradeMode);
         }
         return DeleteControl.defaultDelete();
     }

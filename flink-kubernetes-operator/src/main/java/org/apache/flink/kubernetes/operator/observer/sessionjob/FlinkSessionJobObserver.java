@@ -18,16 +18,14 @@
 package org.apache.flink.kubernetes.operator.observer.sessionjob;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.api.status.FlinkSessionJobStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobStatus;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.exception.MissingSessionJobException;
 import org.apache.flink.kubernetes.operator.observer.AbstractFlinkResourceObserver;
 import org.apache.flink.kubernetes.operator.observer.JobStatusObserver;
-import org.apache.flink.kubernetes.operator.observer.SavepointObserver;
+import org.apache.flink.kubernetes.operator.observer.SnapshotObserver;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.runtime.client.JobStatusMessage;
@@ -43,18 +41,20 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import static org.apache.flink.kubernetes.operator.utils.FlinkUtils.generateSessionJobFixedJobID;
+
 /** The observer of {@link FlinkSessionJob}. */
 public class FlinkSessionJobObserver extends AbstractFlinkResourceObserver<FlinkSessionJob> {
 
     private static final Logger LOG = LoggerFactory.getLogger(FlinkSessionJobObserver.class);
 
     private final SessionJobStatusObserver jobStatusObserver;
-    private final SavepointObserver<FlinkSessionJob, FlinkSessionJobStatus> savepointObserver;
+    private final SnapshotObserver<FlinkSessionJob, FlinkSessionJobStatus> savepointObserver;
 
-    public FlinkSessionJobObserver(FlinkConfigManager configManager, EventRecorder eventRecorder) {
-        super(configManager, eventRecorder);
-        this.jobStatusObserver = new SessionJobStatusObserver(configManager, eventRecorder);
-        this.savepointObserver = new SavepointObserver<>(configManager, eventRecorder);
+    public FlinkSessionJobObserver(EventRecorder eventRecorder) {
+        super(eventRecorder);
+        this.jobStatusObserver = new SessionJobStatusObserver(eventRecorder);
+        this.savepointObserver = new SnapshotObserver<>(eventRecorder);
     }
 
     @Override
@@ -67,12 +67,12 @@ public class FlinkSessionJobObserver extends AbstractFlinkResourceObserver<Flink
         var jobFound = jobStatusObserver.observe(ctx);
         if (jobFound) {
             savepointObserver.observeSavepointStatus(ctx);
+            savepointObserver.observeCheckpointStatus(ctx);
         }
     }
 
     @Override
-    protected void updateStatusToDeployedIfAlreadyUpgraded(
-            FlinkResourceContext<FlinkSessionJob> ctx) {
+    protected boolean checkIfAlreadyUpgraded(FlinkResourceContext<FlinkSessionJob> ctx) {
         var flinkSessionJob = ctx.getResource();
         var uid = flinkSessionJob.getMetadata().getUid();
         Collection<JobStatusMessage> jobStatusMessages;
@@ -84,14 +84,16 @@ public class FlinkSessionJobObserver extends AbstractFlinkResourceObserver<Flink
         var matchedJobs = new ArrayList<JobID>();
         for (JobStatusMessage jobStatusMessage : jobStatusMessages) {
             var jobId = jobStatusMessage.getJobId();
-            if (jobId.getLowerPart() == uid.hashCode()
+            if (jobId.getLowerPart()
+                            == generateSessionJobFixedJobID(uid, jobId.getUpperPart() + 1L)
+                                    .getLowerPart()
                     && !jobStatusMessage.getJobState().isGloballyTerminalState()) {
                 matchedJobs.add(jobId);
             }
         }
 
         if (matchedJobs.isEmpty()) {
-            return;
+            return false;
         } else if (matchedJobs.size() > 1) {
             // this indicates a bug, which means we have more than one running job for a single
             // SessionJob CR.
@@ -111,12 +113,8 @@ public class FlinkSessionJobObserver extends AbstractFlinkResourceObserver<Flink
                         "Pending upgrade is already deployed, updating status. Old jobID:{}, new jobID:{}",
                         oldJobID,
                         matchedJobID.toHexString());
-                ReconciliationUtils.updateStatusForAlreadyUpgraded(flinkSessionJob);
-                flinkSessionJob
-                        .getStatus()
-                        .getJobStatus()
-                        .setState(org.apache.flink.api.common.JobStatus.RECONCILING.name());
                 flinkSessionJob.getStatus().getJobStatus().setJobId(matchedJobID.toHexString());
+                return true;
             } else {
                 var msg =
                         String.format(
@@ -131,9 +129,8 @@ public class FlinkSessionJobObserver extends AbstractFlinkResourceObserver<Flink
 
     private static class SessionJobStatusObserver extends JobStatusObserver<FlinkSessionJob> {
 
-        public SessionJobStatusObserver(
-                FlinkConfigManager configManager, EventRecorder eventRecorder) {
-            super(configManager, eventRecorder);
+        public SessionJobStatusObserver(EventRecorder eventRecorder) {
+            super(eventRecorder);
         }
 
         @Override
@@ -164,25 +161,24 @@ public class FlinkSessionJobObserver extends AbstractFlinkResourceObserver<Flink
         }
 
         @Override
-        protected void onTargetJobNotFound(FlinkSessionJob resource, Configuration config) {
-            ifHaDisabledMarkSessionJobMissing(resource, config);
+        protected void onTargetJobNotFound(FlinkResourceContext<FlinkSessionJob> ctx) {
+            ifHaDisabledMarkSessionJobMissing(ctx);
         }
 
         @Override
-        protected void onNoJobsFound(FlinkSessionJob resource, Configuration config) {
-            ifHaDisabledMarkSessionJobMissing(resource, config);
+        protected void onNoJobsFound(FlinkResourceContext<FlinkSessionJob> ctx) {
+            ifHaDisabledMarkSessionJobMissing(ctx);
         }
 
         /**
          * When HA is disabled the session job will not recover on JM restarts. If the JM goes down
          * / restarted the session job should be marked missing.
          *
-         * @param sessionJob Flink session job.
-         * @param conf Flink config.
+         * @param ctx Flink session job context.
          */
-        private void ifHaDisabledMarkSessionJobMissing(
-                FlinkSessionJob sessionJob, Configuration conf) {
-            if (HighAvailabilityMode.isHighAvailabilityModeActivated(conf)) {
+        private void ifHaDisabledMarkSessionJobMissing(FlinkResourceContext<FlinkSessionJob> ctx) {
+            var sessionJob = ctx.getResource();
+            if (HighAvailabilityMode.isHighAvailabilityModeActivated(ctx.getObserveConfig())) {
                 return;
             }
             sessionJob
@@ -191,15 +187,14 @@ public class FlinkSessionJobObserver extends AbstractFlinkResourceObserver<Flink
                     .setState(org.apache.flink.api.common.JobStatus.RECONCILING.name());
             LOG.error(MISSING_SESSION_JOB_ERR);
             ReconciliationUtils.updateForReconciliationError(
-                    sessionJob,
-                    new MissingSessionJobException(MISSING_SESSION_JOB_ERR),
-                    configManager.getOperatorConfiguration());
+                    ctx, new MissingSessionJobException(MISSING_SESSION_JOB_ERR));
             eventRecorder.triggerEvent(
                     sessionJob,
                     EventRecorder.Type.Warning,
                     EventRecorder.Reason.Missing,
                     EventRecorder.Component.Job,
-                    MISSING_SESSION_JOB_ERR);
+                    MISSING_SESSION_JOB_ERR,
+                    ctx.getKubernetesClient());
         }
     }
 }

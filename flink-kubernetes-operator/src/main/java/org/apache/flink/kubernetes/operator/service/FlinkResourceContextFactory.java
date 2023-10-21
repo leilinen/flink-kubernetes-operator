@@ -22,7 +22,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
-import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
+import org.apache.flink.kubernetes.operator.artifact.ArtifactManager;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.controller.FlinkDeploymentContext;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
@@ -30,8 +30,9 @@ import org.apache.flink.kubernetes.operator.controller.FlinkSessionJobContext;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesResourceMetricGroup;
 import org.apache.flink.kubernetes.operator.metrics.OperatorMetricUtils;
+import org.apache.flink.kubernetes.operator.utils.EventRecorder;
+import org.apache.flink.util.concurrent.ExecutorThreadFactory;
 
-import io.fabric8.kubernetes.client.KubernetesClient;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import org.slf4j.Logger;
@@ -39,28 +40,35 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** Factory for creating the {@link FlinkResourceContext}. */
 public class FlinkResourceContextFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(FlinkResourceContextFactory.class);
 
-    private final KubernetesClient kubernetesClient;
     private final FlinkConfigManager configManager;
+    private final ArtifactManager artifactManager;
+    private final ExecutorService clientExecutorService;
     private final KubernetesOperatorMetricGroup operatorMetricGroup;
-    private final Map<KubernetesDeploymentMode, FlinkService> serviceMap;
+    private final EventRecorder eventRecorder;
 
     protected final Map<Tuple2<Class<?>, ResourceID>, KubernetesResourceMetricGroup>
             resourceMetricGroups = new ConcurrentHashMap<>();
 
     public FlinkResourceContextFactory(
-            KubernetesClient kubernetesClient,
             FlinkConfigManager configManager,
-            KubernetesOperatorMetricGroup operatorMetricGroup) {
-        this.kubernetesClient = kubernetesClient;
+            KubernetesOperatorMetricGroup operatorMetricGroup,
+            EventRecorder eventRecorder) {
         this.configManager = configManager;
         this.operatorMetricGroup = operatorMetricGroup;
-        this.serviceMap = new ConcurrentHashMap<>();
+        this.eventRecorder = eventRecorder;
+        this.artifactManager = new ArtifactManager(configManager);
+        this.clientExecutorService =
+                Executors.newFixedThreadPool(
+                        configManager.getOperatorConfiguration().getReconcilerMaxParallelism(),
+                        new ExecutorThreadFactory("Flink-RestClusterClient-IO"));
     }
 
     public <CR extends AbstractFlinkResource<?, ?>> FlinkResourceContext<CR> getResourceContext(
@@ -76,46 +84,42 @@ public class FlinkResourceContextFactory {
             var flinkDep = (FlinkDeployment) resource;
             return (FlinkResourceContext<CR>)
                     new FlinkDeploymentContext(
-                            flinkDep,
-                            josdkContext,
-                            resMg,
-                            getOrCreateFlinkService(flinkDep),
-                            configManager);
+                            flinkDep, josdkContext, resMg, configManager, this::getFlinkService);
         } else if (resource instanceof FlinkSessionJob) {
             return (FlinkResourceContext<CR>)
                     new FlinkSessionJobContext(
-                            (FlinkSessionJob) resource, josdkContext, resMg, this, configManager);
+                            (FlinkSessionJob) resource,
+                            josdkContext,
+                            resMg,
+                            configManager,
+                            this::getFlinkService);
         } else {
             throw new IllegalArgumentException(
                     "Unknown resource type " + resource.getClass().getSimpleName());
         }
     }
 
-    private FlinkService getOrCreateFlinkService(KubernetesDeploymentMode deploymentMode) {
-        return serviceMap.computeIfAbsent(
-                deploymentMode,
-                mode -> {
-                    switch (mode) {
-                        case NATIVE:
-                            LOG.debug("Using NativeFlinkService");
-                            return new NativeFlinkService(kubernetesClient, configManager);
-                        case STANDALONE:
-                            LOG.debug("Using StandaloneFlinkService");
-                            return new StandaloneFlinkService(kubernetesClient, configManager);
-                        default:
-                            throw new UnsupportedOperationException(
-                                    String.format("Unsupported deployment mode: %s", mode));
-                    }
-                });
-    }
-
     @VisibleForTesting
-    protected FlinkService getOrCreateFlinkService(FlinkDeployment deployment) {
-        return getOrCreateFlinkService(getDeploymentMode(deployment));
-    }
-
-    private KubernetesDeploymentMode getDeploymentMode(FlinkDeployment deployment) {
-        return KubernetesDeploymentMode.getDeploymentMode(deployment);
+    protected FlinkService getFlinkService(FlinkResourceContext<?> ctx) {
+        var deploymentMode = ctx.getDeploymentMode();
+        switch (deploymentMode) {
+            case NATIVE:
+                return new NativeFlinkService(
+                        ctx.getKubernetesClient(),
+                        artifactManager,
+                        clientExecutorService,
+                        ctx.getOperatorConfig(),
+                        eventRecorder);
+            case STANDALONE:
+                return new StandaloneFlinkService(
+                        ctx.getKubernetesClient(),
+                        artifactManager,
+                        clientExecutorService,
+                        ctx.getOperatorConfig());
+            default:
+                throw new UnsupportedOperationException(
+                        String.format("Unsupported deployment mode: %s", deploymentMode));
+        }
     }
 
     public <CR extends AbstractFlinkResource<?, ?>> void cleanup(CR flinkApp) {

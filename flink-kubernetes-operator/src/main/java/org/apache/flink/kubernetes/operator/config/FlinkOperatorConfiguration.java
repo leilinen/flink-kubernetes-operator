@@ -25,13 +25,16 @@ import org.apache.flink.kubernetes.operator.utils.EnvUtils;
 
 import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.javaoperatorsdk.operator.api.config.LeaderElectionConfiguration;
-import io.javaoperatorsdk.operator.api.config.RetryConfiguration;
+import io.javaoperatorsdk.operator.processing.event.rate.LinearRateLimiter;
+import io.javaoperatorsdk.operator.processing.event.rate.RateLimiter;
+import io.javaoperatorsdk.operator.processing.retry.GenericRetry;
 import lombok.Value;
 import org.apache.commons.lang3.StringUtils;
 
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -61,11 +64,13 @@ public class FlinkOperatorConfiguration {
     String artifactsBaseDir;
     Integer savepointHistoryCountThreshold;
     Duration savepointHistoryAgeThreshold;
-    RetryConfiguration retryConfiguration;
+    GenericRetry retryConfiguration;
+    RateLimiter<?> rateLimiter;
     boolean exceptionStackTraceEnabled;
     int exceptionStackTraceLengthThreshold;
     int exceptionFieldLengthThreshold;
     int exceptionThrowableCountThreshold;
+    Map<String, String> exceptionLabelMapper;
     String labelSelector;
     LeaderElectionConfiguration leaderElectionConfiguration;
     DeletionPropagation deletionPropagation;
@@ -122,6 +127,8 @@ public class FlinkOperatorConfiguration {
                 operatorConfig.get(
                         KubernetesOperatorConfigOptions
                                 .OPERATOR_EXCEPTION_THROWABLE_LIST_MAX_COUNT);
+        Map<String, String> exceptionLabelMapper =
+                operatorConfig.get(KubernetesOperatorConfigOptions.OPERATOR_EXCEPTION_LABEL_MAPPER);
 
         String flinkServiceHostOverride = null;
         if (getEnv(ENV_KUBERNETES_SERVICE_HOST).isEmpty()) {
@@ -169,7 +176,8 @@ public class FlinkOperatorConfiguration {
                 operatorConfig.get(
                         KubernetesOperatorMetricOptions.OPERATOR_METRICS_HISTOGRAM_SAMPLE_SIZE);
 
-        RetryConfiguration retryConfiguration = new FlinkOperatorRetryConfiguration(operatorConfig);
+        GenericRetry retryConfiguration = getRetryConfig(operatorConfig);
+        RateLimiter rateLimiter = getRateLimiter(operatorConfig);
 
         String labelSelector =
                 operatorConfig.getString(KubernetesOperatorConfigOptions.OPERATOR_LABEL_SELECTOR);
@@ -196,13 +204,48 @@ public class FlinkOperatorConfiguration {
                 savepointHistoryCountThreshold,
                 savepointHistoryAgeThreshold,
                 retryConfiguration,
+                rateLimiter,
                 exceptionStackTraceEnabled,
                 exceptionStackTraceLengthThreshold,
                 exceptionFieldLengthThreshold,
                 exceptionThrowableCountThreshold,
+                exceptionLabelMapper,
                 labelSelector,
                 getLeaderElectionConfig(operatorConfig),
                 deletionPropagation);
+    }
+
+    private static GenericRetry getRetryConfig(Configuration conf) {
+        var genericRetry =
+                new GenericRetry()
+                        .setMaxAttempts(
+                                conf.getInteger(
+                                        KubernetesOperatorConfigOptions
+                                                .OPERATOR_RETRY_MAX_ATTEMPTS))
+                        .setInitialInterval(
+                                conf.get(
+                                                KubernetesOperatorConfigOptions
+                                                        .OPERATOR_RETRY_INITIAL_INTERVAL)
+                                        .toMillis())
+                        .setIntervalMultiplier(
+                                conf.getDouble(
+                                        KubernetesOperatorConfigOptions
+                                                .OPERATOR_RETRY_INTERVAL_MULTIPLIER));
+
+        if (conf.contains(KubernetesOperatorConfigOptions.OPERATOR_RETRY_MAX_INTERVAL)) {
+            genericRetry.setMaxInterval(
+                    conf.get(KubernetesOperatorConfigOptions.OPERATOR_RETRY_MAX_INTERVAL)
+                            .toMillis());
+        } else {
+            genericRetry.withoutMaxInterval();
+        }
+        return genericRetry;
+    }
+
+    private static RateLimiter<?> getRateLimiter(Configuration conf) {
+        return new LinearRateLimiter(
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_RATE_LIMITER_PERIOD),
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_RATE_LIMITER_LIMIT));
     }
 
     private static LeaderElectionConfiguration getLeaderElectionConfig(Configuration conf) {
@@ -225,46 +268,6 @@ public class FlinkOperatorConfiguration {
                 conf.get(KubernetesOperatorConfigOptions.OPERATOR_LEADER_ELECTION_RENEW_DEADLINE),
                 conf.get(KubernetesOperatorConfigOptions.OPERATOR_LEADER_ELECTION_RETRY_PERIOD),
                 null);
-    }
-
-    /** Enables configurable retry mechanism for reconciliation errors. */
-    protected static class FlinkOperatorRetryConfiguration implements RetryConfiguration {
-        private final int maxAttempts;
-        private final long initialInterval;
-        private final double intervalMultiplier;
-
-        public FlinkOperatorRetryConfiguration(Configuration operatorConfig) {
-            maxAttempts =
-                    operatorConfig.getInteger(
-                            KubernetesOperatorConfigOptions.OPERATOR_RETRY_MAX_ATTEMPTS);
-            initialInterval =
-                    operatorConfig
-                            .get(KubernetesOperatorConfigOptions.OPERATOR_RETRY_INITIAL_INTERVAL)
-                            .toMillis();
-            intervalMultiplier =
-                    operatorConfig.getDouble(
-                            KubernetesOperatorConfigOptions.OPERATOR_RETRY_INTERVAL_MULTIPLIER);
-        }
-
-        @Override
-        public int getMaxAttempts() {
-            return maxAttempts;
-        }
-
-        @Override
-        public long getInitialInterval() {
-            return initialInterval;
-        }
-
-        @Override
-        public double getIntervalMultiplier() {
-            return intervalMultiplier;
-        }
-
-        @Override
-        public long getMaxInterval() {
-            return (long) (initialInterval * Math.pow(intervalMultiplier, maxAttempts));
-        }
     }
 
     private static Optional<String> getEnv(String key) {

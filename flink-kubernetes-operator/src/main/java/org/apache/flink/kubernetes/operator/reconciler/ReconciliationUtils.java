@@ -23,6 +23,7 @@ import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.reconciler.ReconciliationMetadata;
 import org.apache.flink.kubernetes.operator.api.spec.AbstractFlinkSpec;
+import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
 import org.apache.flink.kubernetes.operator.api.spec.JobState;
 import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.api.status.CommonStatus;
@@ -30,20 +31,21 @@ import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobStatus;
 import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
-import org.apache.flink.kubernetes.operator.api.status.SavepointInfo;
-import org.apache.flink.kubernetes.operator.api.status.SavepointTriggerType;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationStatus;
+import org.apache.flink.kubernetes.operator.api.status.SnapshotInfo;
+import org.apache.flink.kubernetes.operator.api.status.SnapshotTriggerType;
 import org.apache.flink.kubernetes.operator.api.status.TaskManagerInfo;
 import org.apache.flink.kubernetes.operator.api.utils.SpecUtils;
 import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.exception.ValidationException;
+import org.apache.flink.kubernetes.operator.service.FlinkService;
 import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.fabric8.kubernetes.client.CustomResource;
 import io.javaoperatorsdk.operator.api.reconciler.ErrorStatusUpdateControl;
-import io.javaoperatorsdk.operator.api.reconciler.RetryInfo;
 import io.javaoperatorsdk.operator.api.reconciler.UpdateControl;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -51,7 +53,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.util.Optional;
 
 import static org.apache.flink.api.common.JobStatus.FINISHED;
 import static org.apache.flink.api.common.JobStatus.RUNNING;
@@ -62,7 +63,6 @@ public class ReconciliationUtils {
 
     private static final Logger LOG = LoggerFactory.getLogger(ReconciliationUtils.class);
 
-    private static final ObjectMapper objectMapper = new ObjectMapper();
     /**
      * Update status after successful deployment of a new resource spec. Existing reconciliation
      * errors will be cleared, lastReconciled spec will be updated and for suspended jobs it will
@@ -125,43 +125,87 @@ public class ReconciliationUtils {
         // Clear errors
         status.setError(null);
         reconciliationStatus.setReconciliationTimestamp(clock.instant().toEpochMilli());
-        reconciliationStatus.setState(
-                upgrading ? ReconciliationState.UPGRADING : ReconciliationState.DEPLOYED);
 
-        if (spec.getJob() != null) {
-            // For jobs we have to adjust the reconciled spec
-            var clonedSpec = ReconciliationUtils.clone(spec);
-            var job = clonedSpec.getJob();
-            job.setState(stateAfterReconcile);
+        var state = reconciliationStatus.getState();
+        if (state == ReconciliationState.ROLLING_BACK) {
+            state = upgrading ? ReconciliationState.ROLLING_BACK : ReconciliationState.ROLLED_BACK;
+        } else {
+            state = upgrading ? ReconciliationState.UPGRADING : ReconciliationState.DEPLOYED;
+        }
+        reconciliationStatus.setState(state);
 
-            var lastSpec = reconciliationStatus.deserializeLastReconciledSpec();
-            if (lastSpec != null) {
-                // We preserve the last savepoint trigger to not lose new triggers during upgrade
-                job.setSavepointTriggerNonce(lastSpec.getJob().getSavepointTriggerNonce());
-            }
-
-            if (target instanceof FlinkDeployment) {
-                // For application deployments we update the taskmanager info
-                ((FlinkDeploymentStatus) status)
-                        .setTaskManager(
-                                getTaskManagerInfo(
-                                        target.getMetadata().getName(), conf, stateAfterReconcile));
-            }
-            reconciliationStatus.serializeAndSetLastReconciledSpec(clonedSpec, target);
-            if (spec.getJob().getState() == JobState.SUSPENDED) {
-                // When a job is suspended by the user it is automatically marked stable
-                reconciliationStatus.markReconciledSpecAsStable();
+        if (state == ReconciliationState.ROLLING_BACK || state == ReconciliationState.ROLLED_BACK) {
+            var lastSpecWithMeta = reconciliationStatus.deserializeLastReconciledSpecWithMeta();
+            var job = lastSpecWithMeta.getSpec().getJob();
+            if (job != null) {
+                // During the rollback we have to update the upgradeMode in the lastReconciledSpec
+                // based on the rollback upgradeMode, this ensures that the next upgrade can be
+                // executed correctly and we don't accidentally lose state.
+                job.setUpgradeMode(spec.getJob().getUpgradeMode());
+                reconciliationStatus.setLastReconciledSpec(
+                        SpecUtils.writeSpecWithMeta(
+                                lastSpecWithMeta.getSpec(), lastSpecWithMeta.getMeta()));
             }
         } else {
-            reconciliationStatus.serializeAndSetLastReconciledSpec(spec, target);
+            SPEC clonedSpec = ReconciliationUtils.clone(spec);
+            if (spec.getJob() != null) {
+                // For jobs we have to adjust the reconciled spec
+                var job = clonedSpec.getJob();
+                job.setState(stateAfterReconcile);
+
+                var lastSpec = reconciliationStatus.deserializeLastReconciledSpec();
+                if (lastSpec != null) {
+                    // We preserve the last snapshot triggers to not lose new triggers during
+                    // upgrade
+                    job.setSavepointTriggerNonce(lastSpec.getJob().getSavepointTriggerNonce());
+                    job.setCheckpointTriggerNonce(lastSpec.getJob().getCheckpointTriggerNonce());
+                }
+
+                if (target instanceof FlinkDeployment) {
+                    // For application deployments we update the taskmanager info
+                    ((FlinkDeploymentStatus) status)
+                            .setTaskManager(
+                                    getTaskManagerInfo(
+                                            target.getMetadata().getName(),
+                                            conf,
+                                            stateAfterReconcile));
+                }
+                reconciliationStatus.serializeAndSetLastReconciledSpec(clonedSpec, target);
+                if (spec.getJob().getState() == JobState.SUSPENDED) {
+                    // When a job is suspended by the user it is automatically marked stable
+                    reconciliationStatus.markReconciledSpecAsStable();
+                }
+            } else {
+                reconciliationStatus.serializeAndSetLastReconciledSpec(clonedSpec, target);
+            }
         }
     }
 
-    public static <SPEC extends AbstractFlinkSpec> void updateLastReconciledSavepointTriggerNonce(
-            SavepointInfo savepointInfo, AbstractFlinkResource<SPEC, ?> target) {
+    public static <SPEC extends AbstractFlinkSpec> void updateAfterScaleUp(
+            AbstractFlinkResource<SPEC, ?> target,
+            Configuration deployConfig,
+            Clock clock,
+            FlinkService.ScalingResult scalingResult) {
+
+        var reconState = target.getStatus().getReconciliationStatus().getState();
+        // We mark the spec reconciled, and set state upgrading only if it was already upgrading or
+        // we actually triggered a new scale up
+        ReconciliationUtils.updateStatusForSpecReconciliation(
+                target,
+                JobState.RUNNING,
+                deployConfig,
+                reconState == ReconciliationState.UPGRADING
+                        || scalingResult == FlinkService.ScalingResult.SCALING_TRIGGERED,
+                clock);
+    }
+
+    public static <SPEC extends AbstractFlinkSpec> void updateLastReconciledSnapshotTriggerNonce(
+            SnapshotInfo snapshotInfo,
+            AbstractFlinkResource<SPEC, ?> target,
+            SnapshotType snapshotType) {
 
         // We only need to update for MANUAL triggers
-        if (savepointInfo.getTriggerType() != SavepointTriggerType.MANUAL) {
+        if (snapshotInfo.getTriggerType() != SnapshotTriggerType.MANUAL) {
             return;
         }
 
@@ -170,12 +214,28 @@ public class ReconciliationUtils {
         var reconciliationStatus = commonStatus.getReconciliationStatus();
         var lastReconciledSpec = reconciliationStatus.deserializeLastReconciledSpec();
 
-        lastReconciledSpec
-                .getJob()
-                .setSavepointTriggerNonce(spec.getJob().getSavepointTriggerNonce());
+        JobSpec lastReconciledJobSpec = lastReconciledSpec.getJob();
+        JobSpec jobSpec = spec.getJob();
+
+        updateLastReconciledJobSpec(lastReconciledJobSpec, jobSpec, snapshotType);
 
         reconciliationStatus.serializeAndSetLastReconciledSpec(lastReconciledSpec, target);
         reconciliationStatus.setReconciliationTimestamp(System.currentTimeMillis());
+    }
+
+    private static void updateLastReconciledJobSpec(
+            JobSpec lastReconciledJobSpec, JobSpec jobSpec, SnapshotType snapshotType) {
+        switch (snapshotType) {
+            case SAVEPOINT:
+                lastReconciledJobSpec.setSavepointTriggerNonce(jobSpec.getSavepointTriggerNonce());
+                break;
+            case CHECKPOINT:
+                lastReconciledJobSpec.setCheckpointTriggerNonce(
+                        jobSpec.getCheckpointTriggerNonce());
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported snapshot type: " + snapshotType);
+        }
     }
 
     private static TaskManagerInfo getTaskManagerInfo(
@@ -188,9 +248,8 @@ public class ReconciliationUtils {
         }
     }
 
-    public static void updateForReconciliationError(
-            AbstractFlinkResource<?, ?> target, Throwable error, FlinkOperatorConfiguration conf) {
-        updateFlinkResourceException(error, target, conf);
+    public static void updateForReconciliationError(FlinkResourceContext ctx, Throwable error) {
+        updateFlinkResourceException(error, ctx.getResource(), ctx.getOperatorConfig());
     }
 
     public static <T> T clone(T object) {
@@ -218,8 +277,9 @@ public class ReconciliationUtils {
         }
 
         if (upgradeStarted(
-                status.getReconciliationStatus().getState(),
-                previous.getStatus().getReconciliationStatus().getState())) {
+                        status.getReconciliationStatus(),
+                        previous.getStatus().getReconciliationStatus())
+                || current.getStatus().isImmediateReconciliationNeeded()) {
             return updateControl.rescheduleAfter(0);
         }
 
@@ -293,8 +353,14 @@ public class ReconciliationUtils {
     }
 
     private static boolean upgradeStarted(
-            ReconciliationState currentReconState, ReconciliationState previousReconState) {
+            ReconciliationStatus<?> currentStatus, ReconciliationStatus<?> previousStatus) {
+        var currentReconState = currentStatus.getState();
+        var previousReconState = previousStatus.getState();
+
         if (currentReconState == previousReconState) {
+            return false;
+        }
+        if (currentStatus.scalingInProgress()) {
             return false;
         }
         return currentReconState == ReconciliationState.ROLLING_BACK
@@ -321,37 +387,43 @@ public class ReconciliationUtils {
      * <p>For in-flight application upgrades we need extra logic to set the desired job state to
      * running
      *
-     * @param deployment The current deployment to be reconciled
+     * @param ctx The current deployment context
      * @param validationError Validation error encountered for the current spec
-     * @param conf Operator config
      * @param <SPEC> Spec type.
      * @return True if the spec was reset and reconciliation can continue. False if nothing to
      *     reconcile.
      */
     public static <SPEC extends AbstractFlinkSpec> boolean applyValidationErrorAndResetSpec(
-            AbstractFlinkResource<SPEC, ?> deployment,
-            String validationError,
-            FlinkOperatorConfiguration conf) {
+            FlinkResourceContext<? extends AbstractFlinkResource<SPEC, ?>> ctx,
+            String validationError) {
 
+        var deployment = ctx.getResource();
         var status = deployment.getStatus();
         if (!validationError.equals(status.getError())) {
             LOG.error("Validation failed: " + validationError);
             ReconciliationUtils.updateForReconciliationError(
-                    deployment, new ValidationException(validationError), conf);
+                    ctx, new ValidationException(validationError));
         }
 
-        var lastReconciledSpec = status.getReconciliationStatus().deserializeLastReconciledSpec();
-        if (lastReconciledSpec == null) {
+        var lastReconciledSpecWithMeta =
+                status.getReconciliationStatus().deserializeLastReconciledSpecWithMeta();
+        if (lastReconciledSpecWithMeta == null) {
             // Validation failed before anything was deployed, nothing to do
             return false;
         } else {
             // We need to observe/reconcile using the last version of the deployment spec
-            deployment.setSpec(lastReconciledSpec);
-            if (status.getReconciliationStatus().getState() == ReconciliationState.UPGRADING) {
+            deployment.setSpec(lastReconciledSpecWithMeta.getSpec());
+            if (status.getReconciliationStatus().getState() == ReconciliationState.UPGRADING
+                    || status.getReconciliationStatus().getState()
+                            == ReconciliationState.ROLLING_BACK) {
                 // We were in the middle of an application upgrade, must set desired state to
                 // running
                 deployment.getSpec().getJob().setState(JobState.RUNNING);
             }
+            deployment
+                    .getMetadata()
+                    .setGeneration(
+                            lastReconciledSpecWithMeta.getMeta().getMetadata().getGeneration());
             return true;
         }
     }
@@ -362,20 +434,18 @@ public class ReconciliationUtils {
      *
      * @param <STATUS> Status type.
      * @param <R> Resource type.
-     * @param resource Flink Resource to be updated
-     * @param retryInfo Current RetryInformation
+     * @param ctx Flink Resource context
      * @param e Exception that caused the retry
      * @param statusRecorder statusRecorder object for patching status
-     * @param operatorConfiguration Operator config
      * @return This always returns Empty optional currently, due to the status update logic
      */
     public static <STATUS extends CommonStatus<?>, R extends AbstractFlinkResource<?, STATUS>>
             ErrorStatusUpdateControl<R> toErrorStatusUpdateControl(
-                    R resource,
-                    Optional<RetryInfo> retryInfo,
+                    FlinkResourceContext<R> ctx,
                     Exception e,
-                    StatusRecorder<R, STATUS> statusRecorder,
-                    FlinkOperatorConfiguration operatorConfiguration) {
+                    StatusRecorder<R, STATUS> statusRecorder) {
+
+        var retryInfo = ctx.getJosdkContext().getRetryInfo();
 
         retryInfo.ifPresent(
                 r ->
@@ -384,9 +454,9 @@ public class ReconciliationUtils {
                                 r.getAttemptCount(),
                                 r.isLastAttempt()));
 
-        statusRecorder.updateStatusFromCache(resource);
-        ReconciliationUtils.updateForReconciliationError(resource, e, operatorConfiguration);
-        statusRecorder.patchAndCacheStatus(resource);
+        statusRecorder.updateStatusFromCache(ctx.getResource());
+        ReconciliationUtils.updateForReconciliationError(ctx, e);
+        statusRecorder.patchAndCacheStatus(ctx.getResource(), ctx.getKubernetesClient());
 
         // Status was updated already, no need to return anything
         return ErrorStatusUpdateControl.noStatusUpdate();
@@ -469,15 +539,16 @@ public class ReconciliationUtils {
      * DEPLOYED while keeping the metadata.
      *
      * @param resource Flink resource to be updated.
-     * @param <SPEC> Spec type.
      */
-    public static <SPEC extends AbstractFlinkSpec> void updateStatusForAlreadyUpgraded(
-            AbstractFlinkResource<SPEC, ?> resource) {
-        var reconciliationStatus = resource.getStatus().getReconciliationStatus();
+    public static void updateStatusForAlreadyUpgraded(AbstractFlinkResource<?, ?> resource) {
+        var status = resource.getStatus();
+        var reconciliationStatus = status.getReconciliationStatus();
         var lastSpecWithMeta = reconciliationStatus.deserializeLastReconciledSpecWithMeta();
         var lastJobSpec = lastSpecWithMeta.getSpec().getJob();
         if (lastJobSpec != null) {
             lastJobSpec.setState(JobState.RUNNING);
+            status.getJobStatus()
+                    .setState(org.apache.flink.api.common.JobStatus.RECONCILING.name());
         }
         reconciliationStatus.setState(ReconciliationState.DEPLOYED);
         reconciliationStatus.setLastReconciledSpec(

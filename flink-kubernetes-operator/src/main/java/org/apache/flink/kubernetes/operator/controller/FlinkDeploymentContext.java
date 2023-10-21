@@ -21,28 +21,26 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.spec.AbstractFlinkSpec;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
+import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesResourceMetricGroup;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
 
 import io.javaoperatorsdk.operator.api.reconciler.Context;
-import lombok.Getter;
 
-/** Context for reconciling a Flink resource. * */
+import java.util.function.Function;
+
+/** Context for reconciling a Flink resource. */
 public class FlinkDeploymentContext extends FlinkResourceContext<FlinkDeployment> {
-
-    private final FlinkConfigManager configManager;
-    @Getter private final FlinkService flinkService;
 
     public FlinkDeploymentContext(
             FlinkDeployment resource,
             Context<?> josdkContext,
             KubernetesResourceMetricGroup resourceMetricGroup,
-            FlinkService flinkService,
-            FlinkConfigManager configManager) {
-        super(resource, josdkContext, resourceMetricGroup);
-        this.configManager = configManager;
-        this.flinkService = flinkService;
+            FlinkConfigManager configManager,
+            Function<FlinkResourceContext<?>, FlinkService> flinkServiceFactory) {
+        super(resource, josdkContext, resourceMetricGroup, configManager, flinkServiceFactory);
     }
 
     @Override
@@ -54,5 +52,15 @@ public class FlinkDeploymentContext extends FlinkResourceContext<FlinkDeployment
     @Override
     protected Configuration createObserveConfig() {
         return configManager.getObserveConfig(getResource());
+    }
+
+    @Override
+    public KubernetesDeploymentMode getDeploymentMode() {
+        return KubernetesDeploymentMode.getDeploymentMode(getResource());
+    }
+
+    @Override
+    public FlinkVersion getFlinkVersion() {
+        return getResource().getSpec().getFlinkVersion();
     }
 }
